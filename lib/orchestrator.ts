@@ -332,7 +332,7 @@ export async function runWorkstream(
       }).eq('id', workstream.id)
 
       // Release file locks
-      await releaseLocks(estimatedFiles, workstream.id)
+      await releaseLocks(workstream.id)
 
       // Reset agent status
       await db.from('agents')
@@ -365,7 +365,7 @@ export async function runWorkstream(
     }).eq('id', workstream.id)
 
     // Release file locks
-    await releaseLocks(estimatedFiles, workstream.id)
+    await releaseLocks(workstream.id)
 
     // Reset agent status
     await db.from('agents')
@@ -386,7 +386,7 @@ export async function runWorkstream(
     }
   } catch (err) {
     // Release file locks on error
-    await releaseLocks(estimatedFiles, workstream.id).catch(() => {})
+    await releaseLocks(workstream.id).catch(() => {})
 
     // Reset agent status on error
     await db.from('agents')
