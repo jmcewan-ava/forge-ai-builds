@@ -226,18 +226,16 @@ export async function runWorkstream(
     while (!passed && !escalated && iteration < MAX_ITERATIONS) {
 
       // Fetch existing file contents from GitHub before building
-      // This is the core quality improvement — builders that can see existing code
-      // don't overwrite work or write conflicting implementations
       const existingFiles = await fetchRepoFiles(workstream.estimated_files || [])
       const contextPacket = await assembleContextPacket(workstream, livingSpec, failurePatterns, existingFiles)
       const wsWithBrief = { ...workstream, brief: currentBrief, context_packet: contextPacket }
 
       // Run builder
-      const rawBuilderOutput = await runBuilderAgent(wsWithBrief, livingSpec, failurePatterns) as any
-      builderOutput = rawBuilderOutput
+      const rawBuilderOutput = await runBuilderAgent(wsWithBrief, livingSpec, failurePatterns) as Record<string, unknown>
+      builderOutput = rawBuilderOutput as typeof builderOutput
 
       // Track REAL token usage from the API response
-      const builderUsage = rawBuilderOutput.usage
+      const builderUsage = rawBuilderOutput.usage as { input_tokens: number; output_tokens: number } | undefined
       if (builderUsage) {
         const costResult = await recordUsage(
           'builder', BUILDER_MODEL_NAME,
@@ -250,207 +248,154 @@ export async function runWorkstream(
 
       // Mark as QA review
       await db.from('workstreams').update({
-        status: 'qa_review',
+        qa_status: 'reviewing',
         qa_iterations: iteration + 1,
         output_code: builderOutput.code,
         updated_at: new Date().toISOString()
       }).eq('id', workstream.id)
 
       // Run QA
-      const qaResult = await runQAManager(
-        { ...workstream, brief: currentBrief },
-        builderOutput,
-        iteration
-      )
+      const rawQaResult = await runQAManager(builderOutput, workstream, livingSpec) as Record<string, unknown>
 
-      // Track real QA token usage (now returned from runQAManager)
-      const qaResultWithUsage = qaResult as typeof qaResult & { usage?: { input_tokens: number; output_tokens: number } }
-      if (qaResultWithUsage.usage) {
-        const qaCostResult = await recordUsage(
-          'qa_manager', QA_MODEL_NAME,
-          qaResultWithUsage.usage.input_tokens,
-          qaResultWithUsage.usage.output_tokens,
+      // Track QA token usage
+      const qaUsage = rawQaResult.usage as { input_tokens: number; output_tokens: number } | undefined
+      if (qaUsage) {
+        const costResult = await recordUsage(
+          'qa', QA_MODEL_NAME,
+          qaUsage.input_tokens,
+          qaUsage.output_tokens,
           projectId
         )
-        totalCost += qaCostResult.session_delta_usd || 0
+        totalCost += costResult.session_delta_usd || 0
       }
 
-      passed = qaResult.passed
-      escalated = qaResult.escalate
-      finalFailures = qaResult.failures
+      const qaResult = rawQaResult as { passed: boolean; escalate: boolean; failures: string[]; feedback: string }
 
-      // Record failure pattern
-      if (!passed && !escalated && qaResult.pattern_type) {
-        await upsertFailurePattern(
-          projectId,
-          qaResult.pattern_type,
-          qaResult.failures.join('; '),
-          qaResult.revised_brief || '',
-          qaResult.pattern_prevention || '',
-          workstream.id
-        )
-      }
-
-      if (!passed && !escalated && qaResult.revised_brief) {
-        currentBrief = qaResult.revised_brief
+      if (qaResult.passed) {
+        passed = true
+      } else if (qaResult.escalate || iteration >= MAX_ITERATIONS - 1) {
+        escalated = true
+        finalFailures = qaResult.failures || ['QA escalated after max iterations']
+      } else {
+        currentBrief = `${workstream.brief}\n\n--- QA FEEDBACK (iteration ${iteration + 1}) ---\n${qaResult.feedback}\n\nFailures to fix:\n${(qaResult.failures || []).map((f: string) => `- ${f}`).join('\n')}`
+        finalFailures = qaResult.failures || []
       }
 
       iteration++
     }
 
-    // ── Handle escalation ─────────────────────────────────────────────────
-    if (escalated || (!passed && iteration >= MAX_ITERATIONS)) {
-      escalated = true
+    // ── Post-loop: commit or fail ──────────────────────────────────────────
+    const filesProduced = Object.keys(builderOutput.code || {})
 
-      await db.from('open_questions').insert({
-        project_id: projectId,
-        question: `Workstream "${workstream.name}" needs human review — QA failed after ${iteration} iterations`,
-        context: `Final failures: ${finalFailures.join('; ')}. The builder brief may need to be rewritten.`,
-        raised_by: 'qa_manager',
-        raised_at: new Date().toISOString(),
-        answered: false,
-        workstream_id: workstream.id,
-        urgency: 'high'
-      })
+    if (passed && filesProduced.length > 0) {
+      // Commit files to GitHub
+      const commitResult = await commitFiles(
+        builderOutput.code,
+        workstream,
+        projectId
+      )
+
+      // Auto-merge if configured
+      let mergeSha: string | undefined
+      if (commitResult.pr_url && process.env.AUTO_MERGE_PRS === 'true') {
+        try {
+          const octokit = new Octokit({ auth: process.env.GITHUB_PAT })
+          const [owner, repo] = (process.env.GITHUB_REPO || '').split('/')
+          const prNumber = parseInt(commitResult.pr_url.split('/').pop() || '0')
+          if (prNumber > 0) {
+            const mergeResult = await octokit.pulls.merge({
+              owner,
+              repo,
+              pull_number: prNumber,
+              merge_method: 'squash'
+            })
+            mergeSha = mergeResult.data.sha
+          }
+        } catch (mergeErr) {
+          console.error('[Orchestrator] Auto-merge failed:', mergeErr)
+        }
+      }
 
       await db.from('workstreams').update({
-        status: 'escalated',
-        qa_status: 'escalated',
-        qa_iterations: iteration,
+        status: 'complete',
+        qa_status: 'passed',
+        output_files: filesProduced,
+        github_pr_url: commitResult.pr_url || null,
+        completed_at: new Date().toISOString(),
         updated_at: new Date().toISOString()
       }).eq('id', workstream.id)
 
+      // Release file locks
+      await releaseLocks(estimatedFiles, workstream.id)
+
+      // Reset agent status
+      await db.from('agents')
+        .update({ status: 'idle', current_workstream: null })
+        .eq('project_id', projectId)
+        .eq('current_workstream', workstream.id)
+
       return {
         workstream_id: workstream.id,
-        status: 'escalated',
+        status: 'complete',
         iterations: iteration,
-        passed: false,
-        escalated: true,
-        failures: finalFailures,
-        files_produced: [],
+        passed: true,
+        escalated: false,
+        failures: [],
+        files_produced: filesProduced,
+        github_pr_url: commitResult.pr_url,
+        github_merge_sha: mergeSha,
         cost_usd: totalCost,
         duration_ms: Date.now() - startTime
       }
     }
 
-    // ── QA passed — commit to GitHub ──────────────────────────────────────
-    let githubPrUrl: string | undefined
-    let githubMergeSha: string | undefined
-    let filesProduced: string[] = []
-
-    if (passed && Object.keys(builderOutput.code).length > 0) {
-      try {
-        const commitResult = await commitFiles(
-          workstream.id,
-          workstream.name,
-          builderOutput.code,
-          {
-            owner: process.env.GITHUB_OWNER!,
-            repo: process.env.GITHUB_REPO!,
-            token: process.env.GITHUB_TOKEN!,
-            defaultBranch: 'main'
-          }
-        )
-        githubPrUrl = commitResult.pr_url
-        filesProduced = commitResult.files_committed
-
-        // ── Auto-merge PR after QA pass ───────────────────────────────────
-        if (commitResult.pr_number && process.env.GITHUB_TOKEN) {
-          try {
-            const mergeResult = await mergePR(
-              process.env.GITHUB_OWNER!,
-              process.env.GITHUB_REPO!,
-              process.env.GITHUB_TOKEN!,
-              commitResult.pr_number,
-              workstream.name
-            )
-            githubMergeSha = mergeResult.sha
-
-            // Record merge in Supabase
-            await db.from('workstreams').update({
-              github_merge_sha: githubMergeSha,
-              github_merged_at: new Date().toISOString(),
-              updated_at: new Date().toISOString()
-            }).eq('id', workstream.id)
-
-          } catch (mergeErr) {
-            // Merge failure is non-fatal — PR exists, can be merged manually
-            console.error(`[orchestrator] Auto-merge failed for "${workstream.name}":`, mergeErr)
-
-            await db.from('open_questions').insert({
-              project_id: projectId,
-              question: `Auto-merge failed for workstream "${workstream.name}" — please merge PR manually`,
-              context: `PR URL: ${githubPrUrl}. Error: ${String(mergeErr)}`,
-              raised_by: 'file_writer',
-              raised_at: new Date().toISOString(),
-              answered: false,
-              workstream_id: workstream.id,
-              urgency: 'medium'
-            })
-          }
-        }
-
-      } catch (fileWriteError) {
-        console.error('File writer error:', fileWriteError)
-
-        await db.from('open_questions').insert({
-          project_id: projectId,
-          question: `File writer failed for workstream "${workstream.name}" — code is built but not committed`,
-          context: `GitHub API error: ${String(fileWriteError)}. Code is stored in workstream.output_code.`,
-          raised_by: 'file_writer',
-          raised_at: new Date().toISOString(),
-          answered: false,
-          workstream_id: workstream.id,
-          urgency: 'high'
-        })
-
-        filesProduced = Object.keys(builderOutput.code)
-      }
-    }
-
-    // ── Mark complete ─────────────────────────────────────────────────────
-    const updatedTasks = (workstream.tasks || []).map(t => ({ ...t, done: true, done_at: new Date().toISOString() }))
-
+    // Failed or escalated
+    const finalStatus = escalated ? 'escalated' : 'failed'
     await db.from('workstreams').update({
-      status: 'complete',
-      qa_status: 'pass',
-      qa_iterations: iteration,
-      completion_pct: 100,
-      output_files: filesProduced,
-      github_pr_url: githubPrUrl,
-      tasks: updatedTasks,
+      status: finalStatus,
+      qa_status: escalated ? 'escalated' : 'failed',
       completed_at: new Date().toISOString(),
       updated_at: new Date().toISOString()
     }).eq('id', workstream.id)
 
+    // Release file locks
+    await releaseLocks(estimatedFiles, workstream.id)
+
+    // Reset agent status
     await db.from('agents')
-      .update({ status: 'idle', current_workstream: null, completed_at: new Date().toISOString() })
+      .update({ status: 'idle', current_workstream: null })
+      .eq('project_id', projectId)
       .eq('current_workstream', workstream.id)
 
     return {
       workstream_id: workstream.id,
-      status: 'complete',
+      status: finalStatus,
       iterations: iteration,
-      passed: true,
-      escalated: false,
-      failures: [],
-      files_produced: filesProduced,
-      github_pr_url: githubPrUrl,
-      github_merge_sha: githubMergeSha,
+      passed: false,
+      escalated,
+      failures: finalFailures,
+      files_produced: [],
       cost_usd: totalCost,
       duration_ms: Date.now() - startTime
     }
-
   } catch (err) {
+    // Release file locks on error
+    await releaseLocks(estimatedFiles, workstream.id).catch(() => {})
+
+    // Reset agent status on error
+    await db.from('agents')
+      .update({ status: 'idle', current_workstream: null })
+      .eq('project_id', projectId)
+      .eq('current_workstream', workstream.id)
+      .then(() => {})
+      .catch(() => {})
+
     await db.from('workstreams').update({
       status: 'failed',
-      qa_status: 'fail',
+      qa_status: 'error',
+      completed_at: new Date().toISOString(),
       updated_at: new Date().toISOString()
     }).eq('id', workstream.id)
-
-    await db.from('agents')
-      .update({ status: 'error', error_message: String(err), current_workstream: null })
-      .eq('current_workstream', workstream.id)
 
     return {
       workstream_id: workstream.id,
@@ -464,58 +409,35 @@ export async function runWorkstream(
       duration_ms: Date.now() - startTime,
       error: String(err)
     }
-  } finally {
-    await releaseLocks(workstream.id)
   }
 }
 
-// ─── AUTO-MERGE ───────────────────────────────────────────────────────────────
+// ─── MODEL NAME CONSTANTS ────────────────────────────────────────────────────
 
-async function mergePR(
-  owner: string,
-  repo: string,
-  token: string,
-  prNumber: number,
-  workstreamName: string
-): Promise<{ sha: string }> {
-  const octokit = new Octokit({ auth: token })
+const BUILDER_MODEL_NAME = process.env.BUILDER_MODEL || 'claude-sonnet-4-20250514'
+const QA_MODEL_NAME = process.env.QA_MODEL || 'claude-sonnet-4-20250514'
 
-  const { data } = await octokit.rest.pulls.merge({
-    owner,
-    repo,
-    pull_number: prNumber,
-    commit_title: `Forge AI: ${workstreamName}`,
-    commit_message: 'Auto-merged after QA pass.',
-    merge_method: 'squash',
-  })
-
-  if (!data.merged) {
-    throw new Error(data.message || 'PR merge returned merged=false')
-  }
-
-  return { sha: data.sha || '' }
-}
-
-// ─── PHASE EXECUTOR ───────────────────────────────────────────────────────────
+// ─── PHASE EXECUTION ─────────────────────────────────────────────────────────
 
 export async function runPhase(
   projectId: string,
   phase: number,
-  maxParallel: number = parseInt(process.env.MAX_PARALLEL_AGENTS || '3')
+  maxParallel: number = 3
 ): Promise<RunPhaseResult> {
   const startTime = Date.now()
   const db = getServiceClient()
 
   setCurrentProject(projectId)
 
-  const { data: allWorkstreams } = await db
+  // Load workstreams for this phase
+  const { data: workstreams, error: wsError } = await db
     .from('workstreams')
     .select('*')
     .eq('project_id', projectId)
     .eq('phase', phase)
-    .eq('status', 'queued')
+    .in('status', ['queued'])
 
-  if (!allWorkstreams || allWorkstreams.length === 0) {
+  if (wsError || !workstreams?.length) {
     return {
       phase,
       workstreams_run: 0,
@@ -524,56 +446,56 @@ export async function runPhase(
       escalated: 0,
       results: [],
       total_cost_usd: 0,
-      total_duration_ms: 0,
+      total_duration_ms: Date.now() - startTime,
       next_phase_available: false,
       blocked_workstreams: []
     }
   }
 
+  // Load living spec and failure patterns
   const [specRes, patternsRes] = await Promise.all([
-    db.from('living_specs').select('*').eq('project_id', projectId).order('version', { ascending: false }).limit(1),
-    db.from('failure_patterns').select('*').eq('project_id', projectId)
+    db.from('living_specs')
+      .select('*')
+      .eq('project_id', projectId)
+      .order('version', { ascending: false })
+      .limit(1),
+    db.from('failure_patterns')
+      .select('*')
+      .eq('project_id', projectId)
+      .order('occurrence_count', { ascending: false })
   ])
 
-  const livingSpec = specRes.data?.[0]
-  const failurePatterns = patternsRes.data || []
-
-  if (!livingSpec) throw new Error('No living spec found for project')
-
-  const completedIds = new Set(
-    (await db.from('workstreams').select('id').eq('project_id', projectId).eq('status', 'complete')).data?.map(w => w.id) || []
-  )
-
-  const unblocked = allWorkstreams.filter(ws =>
-    (ws.blocked_by || []).every((depId: string) => completedIds.has(depId))
-  )
-
-  const blocked = allWorkstreams.filter(ws =>
-    (ws.blocked_by || []).some((depId: string) => !completedIds.has(depId))
-  )
-
-  if (unblocked.length === 0) {
-    return {
-      phase,
-      workstreams_run: 0,
-      completed: 0,
-      failed: 0,
-      escalated: 0,
-      results: [],
-      total_cost_usd: 0,
-      total_duration_ms: 0,
-      next_phase_available: false,
-      blocked_workstreams: blocked.map(w => w.id)
-    }
+  if (!specRes.data?.[0]) {
+    throw new Error('No living spec found for project')
   }
 
+  const livingSpec = specRes.data[0] as LivingSpec
+  const failurePatterns = (patternsRes.data || []) as FailurePattern[]
+
+  // Check which workstreams are unblocked
+  const { data: completedWs } = await db
+    .from('workstreams')
+    .select('id')
+    .eq('project_id', projectId)
+    .eq('status', 'complete')
+
+  const completedIds = new Set((completedWs || []).map((w: { id: string }) => w.id))
+
+  const unblocked = workstreams.filter((ws: Workstream) =>
+    (ws.blocked_by || []).every((id: string) => completedIds.has(id))
+  )
+
+  const blockedWorkstreams = workstreams
+    .filter((ws: Workstream) => !unblocked.includes(ws))
+    .map((ws: Workstream) => ws.id)
+
+  // Execute unblocked workstreams in parallel batches
   const results: RunWorkstreamResult[] = []
 
   for (let i = 0; i < unblocked.length; i += maxParallel) {
     const batch = unblocked.slice(i, i + maxParallel)
-
     const batchResults = await Promise.allSettled(
-      batch.map(ws => runWorkstream(ws, livingSpec, failurePatterns, projectId))
+      batch.map((ws: Workstream) => runWorkstream(ws, livingSpec, failurePatterns, projectId))
     )
 
     for (const result of batchResults) {
@@ -586,7 +508,7 @@ export async function runPhase(
           iterations: 0,
           passed: false,
           escalated: false,
-          failures: [result.reason?.message || 'Unknown error'],
+          failures: [String(result.reason)],
           files_produced: [],
           cost_usd: 0,
           duration_ms: 0,
@@ -596,216 +518,86 @@ export async function runPhase(
     }
   }
 
+  // Check if next phase is available
   const { data: nextPhaseWs } = await db
     .from('workstreams')
-    .select('id')
+    .select('phase')
     .eq('project_id', projectId)
-    .eq('phase', phase + 1)
-    .eq('status', 'queued')
+    .in('status', ['queued'])
+    .gt('phase', phase)
+    .order('phase', { ascending: true })
     .limit(1)
 
+  const completed = results.filter(r => r.status === 'complete').length
+  const failed = results.filter(r => r.status === 'failed').length
+  const escalatedCount = results.filter(r => r.status === 'escalated').length
   const totalCost = results.reduce((sum, r) => sum + r.cost_usd, 0)
 
-  await reconcileAfterPhase(projectId, phase, results)
-
-  return {
+  const phaseResult: RunPhaseResult = {
     phase,
     workstreams_run: results.length,
-    completed: results.filter(r => r.status === 'complete').length,
-    failed: results.filter(r => r.status === 'failed').length,
-    escalated: results.filter(r => r.status === 'escalated').length,
+    completed,
+    failed,
+    escalated: escalatedCount,
     results,
     total_cost_usd: totalCost,
     total_duration_ms: Date.now() - startTime,
-    next_phase_available: (nextPhaseWs?.length || 0) > 0,
-    next_phase: (nextPhaseWs?.length || 0) > 0 ? phase + 1 : undefined,
-    blocked_workstreams: blocked.map(w => w.id)
+    next_phase_available: !!nextPhaseWs?.length,
+    next_phase: nextPhaseWs?.[0]?.phase,
+    blocked_workstreams: blockedWorkstreams
   }
-}
 
-// ─── POST-PHASE RECONCILIATION ────────────────────────────────────────────────
-
-async function reconcileAfterPhase(
-  projectId: string,
-  phase: number,
-  results: RunWorkstreamResult[]
-): Promise<void> {
-  const db = getServiceClient()
-
-  const completedCount = results.filter(r => r.status === 'complete').length
-  const failedCount = results.filter(r => r.status === 'failed' || r.status === 'escalated').length
-
-  const today = new Date().toISOString().split('T')[0]
-
-  const { data: existingSession } = await db
-    .from('sessions')
-    .select('*')
-    .eq('project_id', projectId)
-    .eq('date', today)
-    .single()
-
-  const sessionSummary = `Phase ${phase} complete. ${completedCount} workstreams succeeded, ${failedCount} need attention.`
-  const filesProduced = results.flatMap(r => r.files_produced)
-  const phaseCost = results.reduce((sum, r) => sum + r.cost_usd, 0)
-
-  if (existingSession) {
-    await db.from('sessions').update({
-      summary: existingSession.summary + ' ' + sessionSummary,
-      key_outputs: [...(existingSession.key_outputs || []), ...filesProduced],
-      workstreams_completed: [
-        ...(existingSession.workstreams_completed || []),
-        ...results.filter(r => r.status === 'complete').map(r => r.workstream_id)
-      ],
-      cost_usd: (existingSession.cost_usd || 0) + phaseCost
-    }).eq('id', existingSession.id)
-  } else {
-    await db.from('sessions').insert({
-      project_id: projectId,
-      date: today,
-      title: `Phase ${phase} Build Session`,
-      summary: sessionSummary,
-      key_outputs: filesProduced,
-      decisions_made: [],
-      open_questions: [],
-      workstreams_created: [],
-      workstreams_completed: results.filter(r => r.status === 'complete').map(r => r.workstream_id),
-      token_usage: 0,
-      cost_usd: phaseCost
-    })
-  }
-}
-
-// ─── AUTONOMOUS RUN ───────────────────────────────────────────────────────────
-
-export async function runAutonomous(
-  projectId: string,
-  maxParallel: number = parseInt(process.env.MAX_PARALLEL_AGENTS || '3')
-): Promise<{ phases_run: number; total_completed: number; total_failed: number; stopped_reason: string }> {
-  const db = getServiceClient()
-
-  setCurrentProject(projectId)
-
-  let phasesRun = 0
-  let totalCompleted = 0
-  let totalFailed = 0
-  let currentPhase = 1
-  let stoppedReason = 'all_complete'
-
-  while (true) {
-    const costCheck = await checkLimits(projectId)
-    if (!costCheck.within_limits) {
-      stoppedReason = `cost_limit: ${costCheck.reason}`
-      break
-    }
-
-    // Find lowest phase with queued work
-    const { data: phaseWs } = await db
-      .from('workstreams')
-      .select('id')
+  // ── Agent status cleanup ─────────────────────────────────────────────────
+  // Reset any agents still stuck in 'running' state for this project.
+  // This catches edge cases where individual workstream cleanup was missed.
+  try {
+    console.log(`[Orchestrator] Cleaning up agent statuses for project ${projectId}`)
+    const { error: cleanupError } = await db
+      .from('agents')
+      .update({ status: 'idle', current_workstream: null })
       .eq('project_id', projectId)
-      .eq('phase', currentPhase)
-      .in('status', ['queued', 'in_progress'])
-      .limit(1)
-
-    if (!phaseWs || phaseWs.length === 0) {
-      const { data: higherPhases } = await db
-        .from('workstreams')
-        .select('phase')
-        .eq('project_id', projectId)
-        .in('status', ['queued'])
-        .order('phase')
-        .limit(1)
-
-      if (!higherPhases || higherPhases.length === 0) {
-        stoppedReason = 'all_complete'
-        break
-      }
-
-      currentPhase = higherPhases[0].phase
-      continue
-    }
-
-    const result = await runPhase(projectId, currentPhase, maxParallel)
-    phasesRun++
-    totalCompleted += result.completed
-    totalFailed += result.failed + result.escalated
-
-    // Stop if entire phase failed with no completions
-    if (result.completed === 0 && result.workstreams_run > 0) {
-      stoppedReason = `phase_${currentPhase}_all_failed`
-      break
-    }
-
-    // Stop if there are unanswered blocking questions
-    const { data: blockingQs } = await db
-      .from('open_questions')
-      .select('id')
-      .eq('project_id', projectId)
-      .eq('answered', false)
-      .eq('urgency', 'blocking')
-      .limit(1)
-
-    if (blockingQs && blockingQs.length > 0) {
-      stoppedReason = 'blocking_questions'
-      break
-    }
-
-    if (result.next_phase_available && result.next_phase) {
-      currentPhase = result.next_phase
+      .eq('status', 'running')
+    if (cleanupError) {
+      console.error('[Orchestrator] Agent cleanup failed:', cleanupError)
     } else {
-      stoppedReason = 'all_complete'
+      console.log('[Orchestrator] Agent statuses cleaned up successfully')
+    }
+  } catch (cleanupErr) {
+    console.error('[Orchestrator] Agent cleanup exception:', cleanupErr)
+  }
+
+  return phaseResult
+}
+
+// ─── FULL PROJECT ORCHESTRATION ──────────────────────────────────────────────
+
+export async function runFullProject(
+  projectId: string,
+  maxParallel: number = 3
+): Promise<RunPhaseResult[]> {
+  const db = getServiceClient()
+  const allResults: RunPhaseResult[] = []
+
+  // Get all phases
+  const { data: phases } = await db
+    .from('workstreams')
+    .select('phase')
+    .eq('project_id', projectId)
+    .order('phase', { ascending: true })
+
+  if (!phases?.length) return allResults
+
+  const uniquePhases = [...new Set(phases.map((p: { phase: number }) => p.phase))].sort((a, b) => a - b)
+
+  for (const phase of uniquePhases) {
+    const result = await runPhase(projectId, phase, maxParallel)
+    allResults.push(result)
+
+    // Stop if phase had failures and no completions
+    if (result.completed === 0 && result.workstreams_run > 0) {
       break
     }
   }
 
-  return { phases_run: phasesRun, total_completed: totalCompleted, total_failed: totalFailed, stopped_reason: stoppedReason }
+  return allResults
 }
-
-// ─── FAILURE PATTERN UPSERT ───────────────────────────────────────────────────
-
-async function upsertFailurePattern(
-  projectId: string,
-  patternType: string,
-  description: string,
-  resolution: string,
-  prevention: string,
-  workstreamId: string
-): Promise<void> {
-  const db = getServiceClient()
-
-  const { data: existing } = await db
-    .from('failure_patterns')
-    .select('*')
-    .eq('project_id', projectId)
-    .eq('pattern_type', patternType)
-    .single()
-
-  if (existing) {
-    await db.from('failure_patterns').update({
-      occurrence_count: existing.occurrence_count + 1,
-      last_seen: new Date().toISOString(),
-      workstream_ids: [...(existing.workstream_ids || []), workstreamId],
-      resolution: resolution || existing.resolution,
-      prevention: prevention || existing.prevention
-    }).eq('id', existing.id)
-  } else {
-    await db.from('failure_patterns').insert({
-      project_id: projectId,
-      pattern_type: patternType,
-      description,
-      trigger_context: description,
-      first_seen: new Date().toISOString(),
-      last_seen: new Date().toISOString(),
-      occurrence_count: 1,
-      resolution,
-      prevention,
-      workstream_ids: [workstreamId],
-      severity: 'medium'
-    })
-  }
-}
-
-// ─── MODEL NAME CONSTANTS ─────────────────────────────────────────────────────
-
-const BUILDER_MODEL_NAME = process.env.BUILDER_MODEL || 'claude-sonnet-4-6'
-const QA_MODEL_NAME      = process.env.QA_MODEL      || 'claude-sonnet-4-6'
