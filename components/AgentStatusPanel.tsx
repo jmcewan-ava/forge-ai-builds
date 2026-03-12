@@ -210,7 +210,7 @@ export function AgentStatusPanel({ agents: initialAgents, projectId }: Props) {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <span style={{ fontSize: 12, fontWeight: 800, color: hasActivity ? '#F59E0B' : '#64748B', letterSpacing: '0.08em' }}>
-            AGENTS
+            DREAM TEAM
           </span>
           {hasActivity && (
             <span style={{
