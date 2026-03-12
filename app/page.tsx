@@ -3,6 +3,8 @@
  * Fetches data via /api/dashboard (uses service client, handles new Supabase key formats)
  */
 
+export const dynamic = 'force-dynamic'
+
 import { Dashboard } from '@/components/Dashboard'
 import { getServiceClient } from '@/lib/supabase'
 import type { DashboardData, DashboardStats } from '@/lib/types'

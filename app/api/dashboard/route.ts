@@ -5,6 +5,8 @@
  * Returns all dashboard data in a single parallelised request.
  */
 
+export const dynamic = 'force-dynamic'
+
 import { NextRequest, NextResponse } from 'next/server'
 import { getServiceClient } from '@/lib/supabase'
 import type { DashboardData, DashboardStats } from '@/lib/types'
