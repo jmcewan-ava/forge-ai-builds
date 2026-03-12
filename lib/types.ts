@@ -7,7 +7,22 @@ export type WorkstreamStatus =
   | 'blocked' | 'failed' | 'escalated' | 'paused'
 
 export type Priority = 'P0' | 'P1' | 'P2' | 'P3'
-export type AgentRole = 'office_manager' | 'builder' | 'qa_manager' | 'interview' | 'file_writer'
+export type AgentRole =
+  | 'office_manager'
+  | 'builder'
+  | 'qa_manager'
+  | 'interview'
+  | 'file_writer'
+  // Dream Team agents
+  | 'discovery'
+  | 'architect'
+  | 'surgeon'
+  | 'type_checker'
+  | 'behaviour_qa'
+  | 'product_advisor'
+  | 'product_manager'
+  | 'consultant'
+  | 'orchestrator' 
 export type AgentStatus = 'idle' | 'running' | 'complete' | 'error'
 export type QAStatus = 'pending' | 'pass' | 'fail' | 'escalated'
 export type Urgency = 'low' | 'medium' | 'high' | 'blocking'

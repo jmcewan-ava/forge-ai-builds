@@ -1,28 +1,21 @@
 /**
- * FORGE AI — Orchestration Engine v2
+ * FORGE AI — Orchestration Engine v3 — Dream Team
  *
  * Responsibilities:
  * 1. Dependency graph resolution (topological sort)
  * 2. Parallel workstream execution
  * 3. Phase-level orchestration
- * 4. Post-build reconciliation
- * 5. Auto-merge PRs after QA pass (NEW)
- * 6. Real token cost tracking persisted to Supabase (NEW)
+ * 4. Dream Team pipeline: Discovery → Architect → Surgeon → TypeChecker → BehaviourQA → PM
  *
- * Does NOT make LLM calls directly — delegates to lib/claude.ts
+ * Does NOT make LLM calls directly — delegates to lib/agents/pipeline.ts
  * Does NOT write to GitHub directly — delegates to lib/file-writer.ts
  */
 
-import { Octokit } from '@octokit/rest'
 import { getServiceClient } from './supabase'
-import { runBuilderAgent, runQAManager } from './claude'
-import { acquireLocks, releaseLocks } from './file-lock'
-import { commitFiles } from './file-writer'
-import { checkLimits, recordUsage, setCurrentProject } from './cost-controller'
-import { assembleContextPacket } from './context-packet'
-import { fetchRepoFiles } from './repo-reader'
+import { runDreamTeamPipeline } from './agents/pipeline'
+import { setCurrentProject } from './cost-controller'
 import type {
-  Workstream, Agent, ExecutionPlan, ExecutionLevel,
+  Workstream, ExecutionPlan, ExecutionLevel,
   LivingSpec, FailurePattern, OfficeManagerState, Session
 } from './types'
 
@@ -141,7 +134,7 @@ export function buildExecutionPlan(workstreams: Workstream[]): ExecutionPlan {
   }
 }
 
-// ─── SINGLE WORKSTREAM EXECUTION ─────────────────────────────────────────────
+// ─── SINGLE WORKSTREAM EXECUTION — DREAM TEAM ─────────────────────────────────
 
 export async function runWorkstream(
   workstream: Workstream,
@@ -149,347 +142,28 @@ export async function runWorkstream(
   failurePatterns: FailurePattern[],
   projectId: string
 ): Promise<RunWorkstreamResult> {
-  const startTime = Date.now()
-  const db = getServiceClient()
-
-  // Ensure cost controller has project context
   setCurrentProject(projectId)
 
-  // Check cost limits before starting
-  const costCheck = await checkLimits(projectId)
-  if (!costCheck.within_limits) {
-    return {
-      workstream_id: workstream.id,
-      status: 'failed',
-      iterations: 0,
-      passed: false,
-      escalated: false,
-      failures: [`Cost limit hit: ${costCheck.reason}`],
-      files_produced: [],
-      cost_usd: 0,
-      duration_ms: Date.now() - startTime,
-      error: costCheck.reason
-    }
-  }
+  // Delegate entirely to the Dream Team pipeline
+  // Discovery → Architect → Consultant → Surgeon → TypeChecker → BehaviourQA → PM → ProductAdvisor
+  const result = await runDreamTeamPipeline(workstream, livingSpec, failurePatterns, projectId)
 
-  // Acquire file locks
-  const estimatedFiles = workstream.estimated_files || []
-  if (estimatedFiles.length > 0) {
-    const locked = await acquireLocks(estimatedFiles, workstream.id, 120000)
-    if (!locked) {
-      await db.from('workstreams').update({
-        status: 'queued',
-        updated_at: new Date().toISOString()
-      }).eq('id', workstream.id)
-
-      return {
-        workstream_id: workstream.id,
-        status: 'failed',
-        iterations: 0,
-        passed: false,
-        escalated: false,
-        failures: ['File lock conflict — requeued for next execution'],
-        files_produced: [],
-        cost_usd: 0,
-        duration_ms: Date.now() - startTime
-      }
-    }
-  }
-
-  // Mark as in_progress
-  await db.from('workstreams').update({
-    status: 'in_progress',
-    started_at: new Date().toISOString(),
-    updated_at: new Date().toISOString()
-  }).eq('id', workstream.id)
-
-  // Update agent status
-  await db.from('agents')
-    .update({ status: 'running', current_workstream: workstream.id, started_at: new Date().toISOString() })
-    .eq('project_id', projectId)
-    .eq('role', 'builder')
-    .eq('status', 'idle')
-    .limit(1)
-
-  let iteration = 0
-  let currentBrief = workstream.brief
-  let builderOutput = { code: {} as Record<string, string>, notes: '', handoff: '' }
-  let passed = false
-  let escalated = false
-  let finalFailures: string[] = []
-  let totalCost = 0
-
-  const MAX_ITERATIONS = parseInt(process.env.MAX_QA_ITERATIONS || '3')
-
-  try {
-    // ── Builder → QA Loop ──────────────────────────────────────────────────
-    while (!passed && !escalated && iteration < MAX_ITERATIONS) {
-
-      // Fetch existing file contents from GitHub before building
-      const existingFiles = await fetchRepoFiles(workstream.estimated_files || [])
-      const contextPacket = await assembleContextPacket(workstream, livingSpec, failurePatterns, existingFiles)
-      const wsWithBrief = { ...workstream, brief: currentBrief, context_packet: contextPacket, existing_files: existingFiles }
-
-      // Run builder
-      const rawBuilderOutput = await runBuilderAgent(wsWithBrief, livingSpec, failurePatterns) as unknown as Record<string, unknown>
-      builderOutput = rawBuilderOutput as typeof builderOutput
-
-      // Track REAL token usage from the API response
-      const builderUsage = rawBuilderOutput.usage as { input_tokens: number; output_tokens: number } | undefined
-      if (builderUsage) {
-        const costResult = await recordUsage(
-          'builder', BUILDER_MODEL_NAME,
-          builderUsage.input_tokens,
-          builderUsage.output_tokens,
-          projectId
-        )
-        totalCost += costResult.session_delta_usd || 0
-      }
-
-      // Mark as QA review
-      await db.from('workstreams').update({
-        qa_status: 'reviewing',
-        qa_iterations: iteration + 1,
-        output_code: builderOutput.code,
-        updated_at: new Date().toISOString()
-      }).eq('id', workstream.id)
-
-      // Run QA
-      const rawQaResult = await runQAManager(workstream, builderOutput, iteration) as unknown as Record<string, unknown>
-
-      // Track QA token usage
-      const qaUsage = rawQaResult.usage as { input_tokens: number; output_tokens: number } | undefined
-      if (qaUsage) {
-        const costResult = await recordUsage(
-          'qa', QA_MODEL_NAME,
-          qaUsage.input_tokens,
-          qaUsage.output_tokens,
-          projectId
-        )
-        totalCost += costResult.session_delta_usd || 0
-      }
-
-      const qaResult = rawQaResult as { passed: boolean; escalate: boolean; failures: string[]; feedback: string }
-
-      if (qaResult.passed) {
-        passed = true
-      } else if (qaResult.escalate || iteration >= MAX_ITERATIONS - 1) {
-        escalated = true
-        finalFailures = qaResult.failures || ['QA escalated after max iterations']
-      } else {
-        currentBrief = `${workstream.brief}\n\n--- QA FEEDBACK (iteration ${iteration + 1}) ---\n${qaResult.feedback}\n\nFailures to fix:\n${(qaResult.failures || []).map((f: string) => `- ${f}`).join('\n')}`
-        finalFailures = qaResult.failures || []
-      }
-
-      iteration++
-    }
-
-    // ── Post-loop: commit or fail ──────────────────────────────────────────
-    const filesProduced = Object.keys(builderOutput.code || {})
-
-    if (passed && filesProduced.length > 0) {
-      // Commit files to GitHub
-      const commitResult = await commitFiles(
-        workstream.id,
-        workstream.name,
-        builderOutput.code,
-        {
-          owner: process.env.GITHUB_OWNER!,
-          repo: process.env.GITHUB_REPO!,
-          token: process.env.GITHUB_TOKEN!,
-          defaultBranch: 'main'
-        }
-      )
-
-      // Auto-merge if configured
-      let mergeSha: string | undefined
-      let vercelBuildFailed = false
-
-      if (commitResult.pr_url && process.env.AUTO_MERGE_PRS === 'true') {
-        try {
-          const octokit = new Octokit({ auth: process.env.GITHUB_PAT })
-          const [owner, repo] = (process.env.GITHUB_REPO || '').split('/')
-          const prNumber = parseInt(commitResult.pr_url.split('/').pop() || '0')
-          if (prNumber > 0) {
-            const mergeResult = await octokit.pulls.merge({
-              owner,
-              repo,
-              pull_number: prNumber,
-              merge_method: 'squash'
-            })
-            mergeSha = mergeResult.data.sha
-
-            // ── PM Agent: Poll Vercel until deployment resolves ──────────────
-            if (process.env.VERCEL_TOKEN && process.env.VERCEL_PROJECT_ID) {
-              console.log(`[PM] Waiting for Vercel deployment after merge of ${workstream.name}...`)
-              await new Promise(resolve => setTimeout(resolve, 15000)) // wait 15s for Vercel to pick up
-
-              let deployChecks = 0
-              const maxChecks = 20 // 20 × 15s = 5 min max
-              while (deployChecks < maxChecks) {
-                await new Promise(resolve => setTimeout(resolve, 15000))
-                deployChecks++
-                try {
-                  const vercelRes = await fetch(
-                    `https://api.vercel.com/v6/deployments?projectId=${process.env.VERCEL_PROJECT_ID}&limit=1&target=production`,
-                    { headers: { Authorization: `Bearer ${process.env.VERCEL_TOKEN}` } }
-                  )
-                  const vercelData = await vercelRes.json() as any
-                  const latest = vercelData.deployments?.[0]
-                  if (!latest) continue
-                  if (latest.state === 'READY') {
-                    console.log(`[PM] ✓ Vercel deployment green for ${workstream.name}`)
-                    break
-                  }
-                  if (latest.state === 'ERROR') {
-                    console.error(`[PM] ✗ Vercel build FAILED after merge of ${workstream.name}`)
-                    vercelBuildFailed = true
-                    break
-                  }
-                  console.log(`[PM] Vercel state: ${latest.state} — waiting... (${deployChecks}/${maxChecks})`)
-                } catch (vercelErr) {
-                  console.error('[PM] Vercel poll error:', vercelErr)
-                }
-              }
-            }
-          }
-        } catch (mergeErr) {
-          console.error('[Orchestrator] Auto-merge failed:', mergeErr)
-        }
-      }
-
-      // If Vercel build failed — escalate instead of marking complete
-      if (vercelBuildFailed) {
-        await db.from('workstreams').update({
-          status: 'escalated',
-          qa_status: 'vercel_build_failed',
-          updated_at: new Date().toISOString()
-        }).eq('id', workstream.id)
-
-        await db.from('open_questions').insert({
-          project_id: projectId,
-          workstream_id: workstream.id,
-          question: `Workstream "${workstream.name}" merged but Vercel build FAILED — needs human review`,
-          context: 'PR was merged but the production deployment errored. Check Vercel build logs for TypeScript or import errors.',
-          urgency: 'blocking',
-          asked_by: 'pm_agent',
-          answered: false
-        })
-
-        return {
-          workstream_id: workstream.id,
-          status: 'escalated',
-          iterations: iteration,
-          passed: false,
-          escalated: true,
-          failures: ['Vercel build failed after merge — deployment did not go green'],
-          files_produced: filesProduced,
-          github_pr_url: commitResult.pr_url,
-          cost_usd: totalCost,
-          duration_ms: Date.now() - startTime
-        }
-      }
-
-      await db.from('workstreams').update({
-        status: 'complete',
-        qa_status: 'passed',
-        output_files: filesProduced,
-        github_pr_url: commitResult.pr_url || null,
-        completed_at: new Date().toISOString(),
-        updated_at: new Date().toISOString()
-      }).eq('id', workstream.id)
-
-      // Release file locks
-      await releaseLocks(workstream.id)
-
-      // Reset agent status
-      await db.from('agents')
-        .update({ status: 'idle', current_workstream: null })
-        .eq('project_id', projectId)
-        .eq('current_workstream', workstream.id)
-
-      return {
-        workstream_id: workstream.id,
-        status: 'complete',
-        iterations: iteration,
-        passed: true,
-        escalated: false,
-        failures: [],
-        files_produced: filesProduced,
-        github_pr_url: commitResult.pr_url,
-        github_merge_sha: mergeSha,
-        cost_usd: totalCost,
-        duration_ms: Date.now() - startTime
-      }
-    }
-
-    // Failed or escalated
-    const finalStatus = escalated ? 'escalated' : 'failed'
-    await db.from('workstreams').update({
-      status: finalStatus,
-      qa_status: escalated ? 'escalated' : 'failed',
-      completed_at: new Date().toISOString(),
-      updated_at: new Date().toISOString()
-    }).eq('id', workstream.id)
-
-    // Release file locks
-    await releaseLocks(workstream.id)
-
-    // Reset agent status
-    await db.from('agents')
-      .update({ status: 'idle', current_workstream: null })
-      .eq('project_id', projectId)
-      .eq('current_workstream', workstream.id)
-
-    return {
-      workstream_id: workstream.id,
-      status: finalStatus,
-      iterations: iteration,
-      passed: false,
-      escalated,
-      failures: finalFailures,
-      files_produced: [],
-      cost_usd: totalCost,
-      duration_ms: Date.now() - startTime
-    }
-  } catch (err) {
-    // Release file locks on error
-    await releaseLocks(workstream.id).catch(() => {})
-
-    // Reset agent status on error
-    try {
-      await db.from('agents')
-        .update({ status: 'idle', current_workstream: null })
-        .eq('project_id', projectId)
-        .eq('current_workstream', workstream.id)
-    } catch { /* ignore */ }
-
-    await db.from('workstreams').update({
-      status: 'failed',
-      qa_status: 'error',
-      completed_at: new Date().toISOString(),
-      updated_at: new Date().toISOString()
-    }).eq('id', workstream.id)
-
-    return {
-      workstream_id: workstream.id,
-      status: 'failed',
-      iterations: iteration,
-      passed: false,
-      escalated: false,
-      failures: [String(err)],
-      files_produced: [],
-      cost_usd: totalCost,
-      duration_ms: Date.now() - startTime,
-      error: String(err)
-    }
+  return {
+    workstream_id: result.workstream_id,
+    status: result.status,
+    iterations: result.iterations,
+    passed: result.passed,
+    escalated: result.escalated,
+    failures: result.failures,
+    files_produced: result.files_produced,
+    github_pr_url: result.github_pr_url,
+    github_merge_sha: result.github_merge_sha,
+    cost_usd: result.cost_usd,
+    duration_ms: result.duration_ms,
+    error: result.error
   }
 }
 
-// ─── MODEL NAME CONSTANTS ────────────────────────────────────────────────────
-
-const BUILDER_MODEL_NAME = process.env.BUILDER_MODEL || 'claude-sonnet-4-20250514'
-const QA_MODEL_NAME = process.env.QA_MODEL || 'claude-sonnet-4-20250514'
 
 // ─── PHASE EXECUTION ─────────────────────────────────────────────────────────
 

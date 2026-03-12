@@ -123,13 +123,18 @@ export async function seedDatabase(): Promise<{ message: string; already_seeded?
   // ── CREATE AGENTS ─────────────────────────────────────────────────────────
 
   const agentDefs = [
+    // Core
     { role: 'office_manager', model: 'claude-opus-4-6' },
-    { role: 'builder', model: 'claude-sonnet-4-6' },
-    { role: 'builder', model: 'claude-sonnet-4-6' },
-    { role: 'builder', model: 'claude-sonnet-4-6' },
-    { role: 'qa_manager', model: 'claude-sonnet-4-6' },
     { role: 'interview', model: 'claude-sonnet-4-6' },
-    { role: 'file_writer', model: 'deterministic' }
+    // Dream Team
+    { role: 'discovery', model: 'claude-sonnet-4-6' },
+    { role: 'architect', model: 'claude-opus-4-6' },
+    { role: 'surgeon', model: 'claude-sonnet-4-6' },
+    { role: 'type_checker', model: 'claude-sonnet-4-6' },
+    { role: 'behaviour_qa', model: 'claude-sonnet-4-6' },
+    { role: 'product_advisor', model: 'claude-sonnet-4-6' },
+    { role: 'product_manager', model: 'claude-sonnet-4-6' },
+    { role: 'consultant', model: 'claude-opus-4-6' },
   ]
 
   for (const agent of agentDefs) {

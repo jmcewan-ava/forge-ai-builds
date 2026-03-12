@@ -113,6 +113,25 @@ export async function POST(req: NextRequest) {
                 const r = result.value
                 if (r.status === 'complete') {
                   phaseCompleted++
+                  // Emit pipeline stage summary if available
+                  const dtResult = r as typeof r & {
+                    pipeline_stages?: Array<{ agent: string; status: string; notes?: string }>
+                    type_check_passed?: boolean
+                    deploy_confirmed?: boolean
+                    advisor_briefs_filed?: number
+                  }
+                  if (dtResult.pipeline_stages?.length) {
+                    const summary = dtResult.pipeline_stages
+                      .map((s: { agent: string; status: string; notes?: string }) => `${s.agent}:${s.status === 'passed' ? '✓' : s.status === 'failed' ? '✗' : '~'}`)
+                      .join(' → ')
+                    controller.enqueue(send({ type: 'log', message: `  Pipeline: ${summary}` }))
+                  }
+                  if (dtResult.deploy_confirmed) {
+                    controller.enqueue(send({ type: 'log', message: `  🚀 Deployed to production` }))
+                  }
+                  if (dtResult.advisor_briefs_filed && dtResult.advisor_briefs_filed > 0) {
+                    controller.enqueue(send({ type: 'log', message: `  💡 ${dtResult.advisor_briefs_filed} improvement brief(s) filed by Product Advisor` }))
+                  }
                   controller.enqueue(send({
                     type: 'workstream_complete', workstream_id: ws.id, name: ws.name,
                     files: r.files_produced.length, iterations: r.iterations,

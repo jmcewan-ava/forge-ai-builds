@@ -14,7 +14,17 @@ const ROLE_LABELS: Record<string, string> = {
   builder: 'Builder',
   qa_manager: 'QA Manager',
   interview: 'Interview',
-  file_writer: 'File Writer'
+  file_writer: 'File Writer',
+  // Dream Team
+  discovery: 'Discovery',
+  architect: 'Architect',
+  surgeon: 'Surgeon',
+  type_checker: 'Type Checker',
+  behaviour_qa: 'Behaviour QA',
+  product_advisor: 'Product Advisor',
+  product_manager: 'Product Manager',
+  consultant: 'Consultant',
+  orchestrator: 'Orchestrator',
 }
 
 const ROLE_ICONS: Record<string, string> = {
@@ -22,7 +32,17 @@ const ROLE_ICONS: Record<string, string> = {
   builder: '⚡',
   qa_manager: '🔍',
   interview: '💬',
-  file_writer: '📁'
+  file_writer: '📁',
+  // Dream Team
+  discovery: '🔍',
+  architect: '🏗',
+  surgeon: '🔪',
+  type_checker: '🔬',
+  behaviour_qa: '🧪',
+  product_advisor: '🧭',
+  product_manager: '👔',
+  consultant: '🎯',
+  orchestrator: '⚙️',
 }
 
 const MODEL_SHORT: Record<string, string> = {
