@@ -620,15 +620,33 @@ function WorkstreamDetail({ ws, onRun, running }: { ws: Workstream; onRun: (id: 
 
 // ─── ADMIN PANEL ─────────────────────────────────────────────────────────────
 
-function AdminPanel({ projectId, workstreams, onRefresh }: {
+function AdminPanel({ projectId, workstreams, project, onRefresh }: {
   projectId: string
   workstreams: Workstream[]
+  project: Project
   onRefresh: () => void
 }) {
   const [actionLoading, setActionLoading] = useState<string | null>(null)
   const [result, setResult] = useState<string | null>(null)
   const [health, setHealth] = useState<any>(null)
   const [healthLoading, setHealthLoading] = useState(false)
+  const [autoMerge, setAutoMerge] = useState(project.auto_merge_prs ?? false)
+  const [autoMergeLoading, setAutoMergeLoading] = useState(false)
+
+  async function toggleAutoMerge() {
+    setAutoMergeLoading(true)
+    const next = !autoMerge
+    try {
+      const res = await fetch('/api/admin/project', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ project_id: projectId, auto_merge_prs: next })
+      })
+      if (res.ok) { setAutoMerge(next); onRefresh() }
+      else setResult('✗ Failed to update auto-merge setting')
+    } catch { setResult('✗ Network error') }
+    finally { setAutoMergeLoading(false) }
+  }
 
   const stuckWorkstreams = workstreams.filter(ws => {
     if (ws.status !== 'in_progress') return false
@@ -686,6 +704,32 @@ function AdminPanel({ projectId, workstreams, onRefresh }: {
         <button onClick={loadHealth} disabled={healthLoading} style={btnStyle('#6366F1')}>
           {healthLoading ? 'Loading...' : '↻ Health Check'}
         </button>
+      </div>
+
+      {/* Pipeline Settings */}
+      <div style={{ padding: 16, borderRadius: 10, background: 'var(--surface)', border: '1px solid var(--border)' }}>
+        <p style={{ fontSize: 11, fontWeight: 800, color: '#64748B', letterSpacing: '0.08em', marginBottom: 12 }}>PIPELINE SETTINGS</p>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <div>
+            <p style={{ fontSize: 13, color: '#F1F5F9', fontWeight: 600, margin: 0 }}>Auto-merge PRs</p>
+            <p style={{ fontSize: 11, color: '#64748B', margin: '2px 0 0' }}>Automatically merge agent PRs to main after passing checks</p>
+          </div>
+          <button
+            onClick={toggleAutoMerge}
+            disabled={autoMergeLoading}
+            style={{
+              width: 44, height: 24, borderRadius: 12, border: 'none', cursor: 'pointer',
+              background: autoMerge ? '#6366F1' : '#334155',
+              position: 'relative' as const, transition: 'background 0.2s', flexShrink: 0
+            }}
+          >
+            <span style={{
+              position: 'absolute' as const, top: 3, left: autoMerge ? 22 : 3,
+              width: 18, height: 18, borderRadius: '50%', background: '#fff',
+              transition: 'left 0.2s', display: 'block'
+            }} />
+          </button>
+        </div>
       </div>
 
       {result && (
@@ -1146,7 +1190,7 @@ export function Dashboard({ initialData }: { initialData: DashboardData }) {
 
         {/* ── ADMIN ── */}
         {activeTab === 'admin' && (
-          <AdminPanel projectId={project.id} workstreams={data.workstreams} onRefresh={refresh} />
+          <AdminPanel projectId={project.id} workstreams={data.workstreams} project={project} onRefresh={refresh} />
         )}
 
       </div>

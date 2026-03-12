@@ -84,6 +84,9 @@ export async function runDreamTeamPipeline(
   const db = getServiceClient()
   setCurrentProject(projectId)
 
+  // Fetch project settings (auto_merge_prs etc)
+  const { data: projectRow } = await db.from('projects').select('*').eq('id', projectId).single()
+
   const stages: PipelineStage[] = []
   let totalCost = 0
   let iteration = 0
@@ -369,7 +372,7 @@ export async function runDreamTeamPipeline(
     // ── AUTO-MERGE ───────────────────────────────────────────────────────────
     let mergeSha: string | undefined
 
-    if (commitResult.pr_url && process.env.AUTO_MERGE_PRS === 'true') {
+    if (commitResult.pr_url && (projectRow?.auto_merge_prs === true || process.env.AUTO_MERGE_PRS === 'true')) {
       try {
         const octokit = new Octokit({ auth: process.env.GITHUB_PAT || process.env.GITHUB_TOKEN })
         const { owner, repo } = GITHUB_CONFIG()

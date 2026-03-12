@@ -61,3 +61,17 @@ export async function GET(req: NextRequest) {
     checked_at: new Date().toISOString(),
   })
 }
+
+export async function PATCH(req: NextRequest) {
+  const body = await req.json()
+  const { project_id, auto_merge_prs } = body
+  if (!project_id) return NextResponse.json({ error: 'project_id required' }, { status: 400 })
+
+  const db = getServiceClient()
+  const { error } = await db.from('projects')
+    .update({ auto_merge_prs })
+    .eq('id', project_id)
+
+  if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+  return NextResponse.json({ ok: true, auto_merge_prs })
+}

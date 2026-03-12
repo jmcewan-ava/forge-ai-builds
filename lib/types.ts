@@ -34,6 +34,7 @@ export interface Project {
   status: 'active' | 'paused' | 'complete'
   created_at: string; updated_at: string; tech_stack: string[]
   repository_url?: string; deployment_url?: string; github_default_branch?: string
+  auto_merge_prs?: boolean
 }
 
 export interface LivingSpec {
