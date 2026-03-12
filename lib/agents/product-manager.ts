@@ -76,7 +76,7 @@ A BAD BRIEF:
 If issues are minor, REWRITE the brief to be better.
 If fundamentally broken, REJECT with a clear reason.
 
-Current constraints: ${livingSpec.content.constraints.join('; ')}
+Current constraints: ${(Array.isArray(livingSpec.content.constraints) ? livingSpec.content.constraints : []).join('; ')}
 Current vision: ${livingSpec.content.vision}
 
 Output ONLY valid JSON:

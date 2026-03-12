@@ -50,7 +50,7 @@ export async function runArchitectAgent(
 ): Promise<ChangeManifest> {
 
   const discoveryContext = formatDiscoveryForPrompt(discovery)
-  const stack = livingSpec.content.tech_stack.map(t => `${t.layer}: ${t.choice}`).join(' | ')
+  const stack = (Array.isArray(livingSpec.content.tech_stack) ? livingSpec.content.tech_stack : []).map(t => `${t.layer}: ${t.choice}`).join(' | ')
 
   const systemPrompt = `You are the Architect Agent in the Forge AI system.
 

@@ -122,10 +122,10 @@ ESCALATED/FAILED WORKSTREAMS (things that went wrong):
 ${escalatedWork || '(none)'}
 
 CURRENT SPEC GOALS:
-${livingSpec.content.goals.map((g, i) => `${i + 1}. ${g}`).join('\n')}
+${(Array.isArray(livingSpec.content.goals) ? livingSpec.content.goals : []).map((g, i) => `${i + 1}. ${g}`).join('\n')}
 
 KNOWN CONSTRAINTS:
-${livingSpec.content.constraints.join('\n')}
+${(Array.isArray(livingSpec.content.constraints) ? livingSpec.content.constraints : []).join('\n')}
 
 What improvements should we make next? Be specific and opinionated.`
       }]

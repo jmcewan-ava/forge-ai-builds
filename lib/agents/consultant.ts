@@ -37,8 +37,8 @@ export async function runConsultantAgent(
   workstreamName: string
 ): Promise<ConsultantRecommendation> {
 
-  const stack = livingSpec.content.tech_stack.map(t => `${t.layer}: ${t.choice}`).join('\n')
-  const constraints = livingSpec.content.constraints.join('\n')
+  const stack = (Array.isArray(livingSpec.content.tech_stack) ? livingSpec.content.tech_stack : []).map(t => `${t.layer}: ${t.choice}`).join('\n')
+  const constraints = (Array.isArray(livingSpec.content.constraints) ? livingSpec.content.constraints : []).join('\n')
   const decisions = (livingSpec.content.architecture || [])
     .filter(a => a.status === 'decided')
     .map(a => `${a.component}: ${a.description}`)

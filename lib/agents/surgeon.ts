@@ -145,7 +145,7 @@ export async function runSurgeonAgent(
           // Need to generate content — use LLM
           const manifestContext = formatManifestForPrompt(manifest)
           const discoveryContext = formatDiscoveryForPrompt(discovery)
-          const stack = livingSpec.content.tech_stack.map(t => `${t.layer}: ${t.choice}`).join(' | ')
+          const stack = (Array.isArray(livingSpec.content.tech_stack) ? livingSpec.content.tech_stack : []).map(t => `${t.layer}: ${t.choice}`).join(' | ')
 
           const response = await anthropic.messages.create({
             model: SURGEON_MODEL,
