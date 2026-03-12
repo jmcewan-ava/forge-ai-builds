@@ -290,9 +290,15 @@ export async function runWorkstream(
     if (passed && filesProduced.length > 0) {
       // Commit files to GitHub
       const commitResult = await commitFiles(
+        workstream.id,
+        workstream.name,
         builderOutput.code,
-        workstream,
-        projectId
+        {
+          owner: process.env.GITHUB_OWNER!,
+          repo: process.env.GITHUB_REPO!,
+          token: process.env.GITHUB_TOKEN!,
+          defaultBranch: 'main'
+        }
       )
 
       // Auto-merge if configured
