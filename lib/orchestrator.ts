@@ -389,12 +389,12 @@ export async function runWorkstream(
     await releaseLocks(workstream.id).catch(() => {})
 
     // Reset agent status on error
-    await db.from('agents')
-      .update({ status: 'idle', current_workstream: null })
-      .eq('project_id', projectId)
-      .eq('current_workstream', workstream.id)
-      .then(() => {})
-      .catch(() => {})
+    try {
+      await db.from('agents')
+        .update({ status: 'idle', current_workstream: null })
+        .eq('project_id', projectId)
+        .eq('current_workstream', workstream.id)
+    } catch { /* ignore */ }
 
     await db.from('workstreams').update({
       status: 'failed',
