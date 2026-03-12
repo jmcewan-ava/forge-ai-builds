@@ -1,16 +1,22 @@
-import type { Metadata } from 'next'
-import './globals.css'
+import type { Metadata } from 'next';
+import './globals.css';
+import AuthGate from '@/components/AuthGate';
 
 export const metadata: Metadata = {
-  title: 'Forge AI — Software Factory',
+  title: 'Forge AI',
   description: 'Autonomous multi-agent software factory',
-  icons: { icon: 'data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>⚙</text></svg>' }
-}
+};
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}): React.JSX.Element {
   return (
     <html lang="en">
-      <body>{children}</body>
+      <body className="bg-[#0a0a0f] text-white antialiased">
+        <AuthGate>{children}</AuthGate>
+      </body>
     </html>
-  )
+  );
 }
