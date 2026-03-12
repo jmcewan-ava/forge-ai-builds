@@ -24,34 +24,10 @@ export async function commitFiles(
   config: GitHubConfig
 ): Promise<CommitResult> {
   const octokit = new Octokit({ auth: config.token })
-  const branchName = `forge/ws-${workstreamId}`
   const committedFiles: string[] = []
+  const targetBranch = config.defaultBranch  // commit direct to main — no PR dance
 
-  // ── Get default branch SHA ────────────────────────────────────────────────
-
-  const { data: refData } = await octokit.rest.git.getRef({
-    owner: config.owner,
-    repo: config.repo,
-    ref: `heads/${config.defaultBranch}`
-  })
-
-  const baseSha = refData.object.sha
-
-  // ── Create feature branch (or get existing) ───────────────────────────────
-
-  try {
-    await octokit.rest.git.createRef({
-      owner: config.owner,
-      repo: config.repo,
-      ref: `refs/heads/${branchName}`,
-      sha: baseSha
-    })
-  } catch (err: any) {
-    // Branch already exists — that's fine, we'll commit to it
-    if (!err.message?.includes('already exists')) throw err
-  }
-
-  // ── Commit each file ──────────────────────────────────────────────────────
+  // ── Commit each file directly to main ────────────────────────────────────
 
   for (const [filepath, content] of Object.entries(files)) {
     try {
@@ -62,7 +38,7 @@ export async function commitFiles(
           owner: config.owner,
           repo: config.repo,
           path: filepath,
-          ref: branchName
+          ref: targetBranch
         })
         if (!Array.isArray(existing) && existing.type === 'file') {
           existingSha = existing.sha
@@ -71,7 +47,6 @@ export async function commitFiles(
         // File doesn't exist yet — create it
       }
 
-      // Commit the file
       await withRetry(async () => {
         await octokit.rest.repos.createOrUpdateFileContents({
           owner: config.owner,
@@ -79,61 +54,22 @@ export async function commitFiles(
           path: filepath,
           message: `forge: ${workstreamName} [${workstreamId.substring(0, 8)}]`,
           content: Buffer.from(content, 'utf8').toString('base64'),
-          branch: branchName,
+          branch: targetBranch,
           ...(existingSha ? { sha: existingSha } : {})
         })
       })
 
       committedFiles.push(filepath)
     } catch (err) {
-      // Rollback already-committed files
-      await rollbackFiles(workstreamId, committedFiles, config)
-      throw new Error(
-        `File commit failed for ${filepath}: ${String(err)}. ` +
-        `Rolled back ${committedFiles.length} previously committed files.`
-      )
+      throw new Error(`File commit failed for ${filepath}: ${String(err)}`)
     }
-  }
-
-  // ── Open PR ───────────────────────────────────────────────────────────────
-
-  let prUrl: string | undefined
-  let prNumber: number | undefined
-
-  try {
-    // Check if PR already exists for this branch (idempotent)
-    const { data: existingPRs } = await octokit.rest.pulls.list({
-      owner: config.owner,
-      repo: config.repo,
-      head: `${config.owner}:${branchName}`,
-      state: 'open',
-    })
-
-    if (existingPRs.length > 0) {
-      prUrl = existingPRs[0].html_url
-      prNumber = existingPRs[0].number
-    } else {
-      const { data: pr } = await octokit.rest.pulls.create({
-        owner: config.owner,
-        repo: config.repo,
-        title: `Forge AI: ${workstreamName}`,
-        body: buildPRBody(workstreamId, workstreamName, committedFiles),
-        head: branchName,
-        base: config.defaultBranch
-      })
-      prUrl = pr.html_url
-      prNumber = pr.number
-    }
-  } catch (err) {
-    // PR creation failure is non-fatal — files are committed
-    console.error('PR creation failed (non-fatal):', err)
   }
 
   return {
-    pr_url: prUrl,
-    pr_number: prNumber,
+    pr_url: undefined,
+    pr_number: undefined,
     files_committed: committedFiles,
-    branch: branchName
+    branch: targetBranch
   }
 }
 
