@@ -252,7 +252,7 @@ Output ONLY valid JSON — no explanation, no markdown:
 
   const response = await withRetry(() => anthropic.messages.create({
     model: BUILDER_MODEL,
-    max_tokens: 8192,
+    max_tokens: 16000,
     temperature: 0.2,
     system: systemPrompt,
     messages: [{
@@ -263,8 +263,21 @@ Output ONLY valid JSON — no explanation, no markdown:
 
   const text = response.content[0].type === 'text' ? response.content[0].text : ''
 
+  // Attempt to extract valid JSON even from truncated or markdown-wrapped responses
+  function extractJSON(raw: string): string {
+    // Strip markdown fences
+    let s = raw.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim()
+    // Find first { and last } — handles trailing text after JSON
+    const start = s.indexOf('{')
+    const end = s.lastIndexOf('}')
+    if (start !== -1 && end !== -1 && end > start) {
+      s = s.slice(start, end + 1)
+    }
+    return s
+  }
+
   try {
-    const clean = text.replace(/```json|```/g, '').trim()
+    const clean = extractJSON(text)
     const parsed = JSON.parse(clean)
 
     // Brief 4: Log agent conversation for debugging
@@ -289,8 +302,16 @@ Output ONLY valid JSON — no explanation, no markdown:
       usage: response.usage,
     } as BuilderOutput & { usage: any }
   } catch (e) {
+    // Log first 1000 chars of raw response to help diagnose truncation/format issues
     console.error('Builder Agent parse error for workstream:', workstream.name)
-    return { code: {}, notes: 'Build failed — JSON parse error', handoff: '', open_questions: [] }
+    console.error('Raw response (first 1000 chars):', text.slice(0, 1000))
+    console.error('Raw response (last 500 chars):', text.slice(-500))
+    return { 
+      code: {}, 
+      notes: `Build failed — JSON parse error. Response length: ${text.length} chars. Check logs for raw output.`, 
+      handoff: '', 
+      open_questions: [`Builder returned unparseable response (${text.length} chars) — may need to split this workstream into smaller pieces`] 
+    }
   }
 }
 
