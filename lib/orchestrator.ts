@@ -255,7 +255,7 @@ export async function runWorkstream(
       }).eq('id', workstream.id)
 
       // Run QA
-      const rawQaResult = await runQAManager(builderOutput, workstream, livingSpec) as unknown as Record<string, unknown>
+      const rawQaResult = await runQAManager(workstream, builderOutput, iteration) as unknown as Record<string, unknown>
 
       // Track QA token usage
       const qaUsage = rawQaResult.usage as { input_tokens: number; output_tokens: number } | undefined
