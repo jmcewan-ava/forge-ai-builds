@@ -220,32 +220,53 @@ export async function runBuilderAgent(
     .map(fp => `CRITICAL — AVOID: ${fp.pattern_type}\n  Prevention: ${fp.prevention}`)
     .join('\n\n')
 
-  const systemPrompt = `You are a Builder Agent in the Forge AI autonomous software factory.
+  const systemPrompt = `You are a Surgeon Agent in the Forge AI autonomous software factory.
 
-You produce production-grade Next.js 14 + TypeScript code.
+You make SURGICAL, PRECISE edits to existing code. You do NOT rewrite entire files.
 
 Project: ${livingSpec.content.vision}
 Stack: ${livingSpec.content.tech_stack.map(t => `${t.layer}: ${t.choice}`).join(' | ')}
 
 ${patterns ? `\nKNOWN FAILURE PATTERNS — AVOID THESE:\n${patterns}\n` : ''}
 
-ABSOLUTE RULES:
-1. Write COMPLETE files — zero placeholders, zero TODOs, zero "// implement later"
-2. Every function has explicit TypeScript types — never use 'any'
-3. Every async function has try/catch or .catch()
-4. Every import is from real packages or relative paths that exist
-5. Code runs on first execution — no additional setup required
-6. NEVER hardcode secrets, API keys, or env-specific values
-7. Use process.env.VARIABLE_NAME for all config
+${workstream.context_packet ? `\nCONTEXT (includes existing file contents — READ THESE CAREFULLY):\n${workstream.context_packet}\n` : ''}
 
-${workstream.context_packet ? `\nCONTEXT:\n${workstream.context_packet}\n` : ''}
+YOUR PROCESS — follow this exactly:
+
+STEP 1 — DISCOVERY: Read every existing file provided in context. Note:
+- Every exported function name and its EXACT signature (parameters and types)
+- Every import in every file
+- What each file's responsibility is
+
+STEP 2 — PLAN: Write out in your notes exactly what you will change and why.
+For each file: list which functions/lines you will touch and what the change is.
+
+STEP 3 — SURGICAL EDIT: For existing files, output ONLY the changed sections as find/replace pairs.
+For new files, output the complete file content.
+
+ABSOLUTE RULES:
+1. NEVER change a function signature without checking every file that calls it
+2. NEVER rename an exported function — update all callers in the same edit
+3. Every import must reference a function that actually exists with that exact name
+4. Function call arguments must match the function signature exactly
+5. For existing files: prefer targeted edits over full rewrites
+6. Every async function has try/catch
+7. Never use 'any' — use explicit TypeScript types
+8. NEVER hardcode secrets — use process.env.VARIABLE_NAME
 
 Output ONLY valid JSON — no explanation, no markdown:
 {
   "files": {
-    "exact/path/to/file.ts": "complete file content here"
+    "path/to/new-file.ts": "complete content — only for NEW files"
   },
-  "notes": "brief explanation of decisions made",
+  "edits": [
+    {
+      "file": "path/to/existing-file.ts",
+      "find": "exact existing code block to replace (must be unique in the file)",
+      "replace": "new code to replace it with"
+    }
+  ],
+  "notes": "STEP 1 discovery findings + STEP 2 plan + decisions made",
   "handoff": "what QA needs to verify",
   "open_questions": ["questions that blocked you — be specific"]
 }`
@@ -294,8 +315,30 @@ Output ONLY valid JSON — no explanation, no markdown:
       iteration: 0,
     })
 
+    // Merge new files + apply surgical edits into a single code map
+    const code: Record<string, string> = { ...(parsed.files || {}) }
+
+    // Apply edits: fetch existing file content and apply find/replace
+    if (Array.isArray(parsed.edits)) {
+      for (const edit of parsed.edits) {
+        if (!edit.file || edit.find === undefined || edit.replace === undefined) continue
+        // Get current content from existing files (injected via repo-reader)
+        const existingContent = (workstream as any).existing_files?.[edit.file] || code[edit.file] || ''
+        if (existingContent && existingContent.includes(edit.find)) {
+          code[edit.file] = existingContent.replace(edit.find, edit.replace)
+        } else if (existingContent) {
+          // find block not found — log and skip rather than corrupting the file
+          console.warn(`Builder edit: could not find block in ${edit.file} — skipping edit`)
+          console.warn(`Looking for: ${edit.find.slice(0, 100)}`)
+        } else {
+          // No existing content — treat as new file with just the replacement
+          code[edit.file] = edit.replace
+        }
+      }
+    }
+
     return {
-      code: parsed.files || {},
+      code,
       notes: parsed.notes || '',
       handoff: parsed.handoff || '',
       open_questions: parsed.open_questions || [],

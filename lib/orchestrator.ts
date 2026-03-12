@@ -228,7 +228,7 @@ export async function runWorkstream(
       // Fetch existing file contents from GitHub before building
       const existingFiles = await fetchRepoFiles(workstream.estimated_files || [])
       const contextPacket = await assembleContextPacket(workstream, livingSpec, failurePatterns, existingFiles)
-      const wsWithBrief = { ...workstream, brief: currentBrief, context_packet: contextPacket }
+      const wsWithBrief = { ...workstream, brief: currentBrief, context_packet: contextPacket, existing_files: existingFiles }
 
       // Run builder
       const rawBuilderOutput = await runBuilderAgent(wsWithBrief, livingSpec, failurePatterns) as unknown as Record<string, unknown>
@@ -303,6 +303,8 @@ export async function runWorkstream(
 
       // Auto-merge if configured
       let mergeSha: string | undefined
+      let vercelBuildFailed = false
+
       if (commitResult.pr_url && process.env.AUTO_MERGE_PRS === 'true') {
         try {
           const octokit = new Octokit({ auth: process.env.GITHUB_PAT })
@@ -316,9 +318,75 @@ export async function runWorkstream(
               merge_method: 'squash'
             })
             mergeSha = mergeResult.data.sha
+
+            // ── PM Agent: Poll Vercel until deployment resolves ──────────────
+            if (process.env.VERCEL_TOKEN && process.env.VERCEL_PROJECT_ID) {
+              console.log(`[PM] Waiting for Vercel deployment after merge of ${workstream.name}...`)
+              await new Promise(resolve => setTimeout(resolve, 15000)) // wait 15s for Vercel to pick up
+
+              let deployChecks = 0
+              const maxChecks = 20 // 20 × 15s = 5 min max
+              while (deployChecks < maxChecks) {
+                await new Promise(resolve => setTimeout(resolve, 15000))
+                deployChecks++
+                try {
+                  const vercelRes = await fetch(
+                    `https://api.vercel.com/v6/deployments?projectId=${process.env.VERCEL_PROJECT_ID}&limit=1&target=production`,
+                    { headers: { Authorization: `Bearer ${process.env.VERCEL_TOKEN}` } }
+                  )
+                  const vercelData = await vercelRes.json() as any
+                  const latest = vercelData.deployments?.[0]
+                  if (!latest) continue
+                  if (latest.state === 'READY') {
+                    console.log(`[PM] ✓ Vercel deployment green for ${workstream.name}`)
+                    break
+                  }
+                  if (latest.state === 'ERROR') {
+                    console.error(`[PM] ✗ Vercel build FAILED after merge of ${workstream.name}`)
+                    vercelBuildFailed = true
+                    break
+                  }
+                  console.log(`[PM] Vercel state: ${latest.state} — waiting... (${deployChecks}/${maxChecks})`)
+                } catch (vercelErr) {
+                  console.error('[PM] Vercel poll error:', vercelErr)
+                }
+              }
+            }
           }
         } catch (mergeErr) {
           console.error('[Orchestrator] Auto-merge failed:', mergeErr)
+        }
+      }
+
+      // If Vercel build failed — escalate instead of marking complete
+      if (vercelBuildFailed) {
+        await db.from('workstreams').update({
+          status: 'escalated',
+          qa_status: 'vercel_build_failed',
+          updated_at: new Date().toISOString()
+        }).eq('id', workstream.id)
+
+        await db.from('open_questions').insert({
+          project_id: projectId,
+          workstream_id: workstream.id,
+          question: `Workstream "${workstream.name}" merged but Vercel build FAILED — needs human review`,
+          context: 'PR was merged but the production deployment errored. Check Vercel build logs for TypeScript or import errors.',
+          urgency: 'blocking',
+          asked_by: 'pm_agent',
+          answered: false
+        })
+
+        return {
+          workstream_id: workstream.id,
+          status: 'escalated',
+          iterations: iteration,
+          passed: false,
+          escalated: true,
+          failures: ['Vercel build failed after merge — deployment did not go green'],
+          files_produced: filesProduced,
+          github_pr_url: commitResult.pr_url,
+          cost_usd: totalCost,
+          duration_ms: Date.now() - startTime
         }
       }
 
