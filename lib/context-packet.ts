@@ -7,6 +7,7 @@
  */
 
 import type { Workstream, LivingSpec, FailurePattern } from './types'
+import { formatExistingFiles } from './repo-reader'
 
 // ─── SEMANTIC KEYWORD MATCHING ────────────────────────────────────────────────
 
@@ -81,15 +82,16 @@ function selectRelevantPatterns(
 export async function assembleContextPacket(
   workstream: Workstream,
   livingSpec: LivingSpec,
-  allFailurePatterns: FailurePattern[]
+  allFailurePatterns: FailurePattern[],
+  existingFiles: Record<string, string> = {}
 ): Promise<string> {
   const lines: string[] = []
 
-  // ── Project context (brief, ~100 tokens) ──────────────────────────────────
+  // ── Project context ───────────────────────────────────────────────────────
   lines.push(`PROJECT: ${livingSpec.content.vision}`)
   lines.push('')
 
-  // ── Tech stack (one line each) ────────────────────────────────────────────
+  // ── Tech stack ────────────────────────────────────────────────────────────
   lines.push('TECH STACK:')
   for (const tech of livingSpec.content.tech_stack) {
     lines.push(`  ${tech.layer}: ${tech.choice}`)
@@ -127,15 +129,10 @@ export async function assembleContextPacket(
     }
   }
 
-  // ── Existing files (to prevent collision) ────────────────────────────────
-  const allExistingFiles = livingSpec.content.architecture
-    ?.flatMap(n => n.file_paths || []) || []
-  
-  if (allExistingFiles.length > 0) {
-    lines.push('EXISTING FILES (do not overwrite unless your brief specifically says to):')
-    for (const file of allExistingFiles.slice(0, 15)) {
-      lines.push(`  ${file}`)
-    }
+  // ── EXISTING FILE CONTENTS from GitHub (most important context) ───────────
+  // Fetched live before every build. Builders MUST read before writing.
+  if (Object.keys(existingFiles).length > 0) {
+    lines.push(formatExistingFiles(existingFiles))
     lines.push('')
   }
 

@@ -20,6 +20,7 @@ import { acquireLocks, releaseLocks } from './file-lock'
 import { commitFiles } from './file-writer'
 import { checkLimits, recordUsage, setCurrentProject } from './cost-controller'
 import { assembleContextPacket } from './context-packet'
+import { fetchRepoFiles } from './repo-reader'
 import type {
   Workstream, Agent, ExecutionPlan, ExecutionLevel,
   LivingSpec, FailurePattern, OfficeManagerState, Session
@@ -224,7 +225,11 @@ export async function runWorkstream(
     // ── Builder → QA Loop ──────────────────────────────────────────────────
     while (!passed && !escalated && iteration < MAX_ITERATIONS) {
 
-      const contextPacket = await assembleContextPacket(workstream, livingSpec, failurePatterns)
+      // Fetch existing file contents from GitHub before building
+      // This is the core quality improvement — builders that can see existing code
+      // don't overwrite work or write conflicting implementations
+      const existingFiles = await fetchRepoFiles(workstream.estimated_files || [])
+      const contextPacket = await assembleContextPacket(workstream, livingSpec, failurePatterns, existingFiles)
       const wsWithBrief = { ...workstream, brief: currentBrief, context_packet: contextPacket }
 
       // Run builder

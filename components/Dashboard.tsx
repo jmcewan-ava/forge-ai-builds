@@ -422,6 +422,22 @@ function BriefInput({
 function WorkstreamDetail({ ws, onRun, running }: { ws: Workstream; onRun: (id: string) => void; running: boolean }) {
   const canRun = ws.status === 'queued' || ws.status === 'failed' || ws.status === 'escalated'
   const [showBrief, setShowBrief] = useState(false)
+  const [showLogs, setShowLogs] = useState(false)
+  const [logs, setLogs] = useState<Array<{ agent_role: string; model: string; input_tokens: number; output_tokens: number; cost_usd: number; response_text: string; created_at: string; iteration: number }>>([])
+  const [logsLoading, setLogsLoading] = useState(false)
+  const [expandedLog, setExpandedLog] = useState<number | null>(null)
+
+  async function loadLogs() {
+    setLogsLoading(true)
+    try {
+      const res = await fetch(`/api/admin/logs?workstream_id=${ws.id}`)
+      if (res.ok) {
+        const data = await res.json()
+        setLogs(data.logs || [])
+      }
+    } catch {}
+    setLogsLoading(false)
+  }
 
   return (
     <div style={{ padding: 20, borderRadius: 12, background: 'var(--surface)', border: '1px solid rgba(99,102,241,0.25)', position: 'sticky' as const, top: 72 }}>
@@ -490,6 +506,43 @@ function WorkstreamDetail({ ws, onRun, running }: { ws: Workstream; onRun: (id: 
           <span style={{ fontSize: 10, opacity: 0.7 }}>↗</span>
         </a>
       )}
+
+      {/* Agent Logs */}
+      <div style={{ marginBottom: 14 }}>
+        <button
+          onClick={() => { setShowLogs(!showLogs); if (!showLogs && logs.length === 0) loadLogs() }}
+          style={{ fontSize: 10, fontWeight: 700, color: '#475569', letterSpacing: '0.08em', background: 'none', border: 'none', cursor: 'pointer', padding: '4px 0', textTransform: 'uppercase' as const }}
+        >
+          {showLogs ? '▼' : '▶'} Agent Logs {logs.length > 0 ? `(${logs.length})` : ''}
+        </button>
+        {showLogs && (
+          <div style={{ marginTop: 8 }}>
+            {logsLoading && <p style={{ fontSize: 11, color: '#475569', fontFamily: 'var(--font-mono)' }}>Loading...</p>}
+            {!logsLoading && logs.length === 0 && <p style={{ fontSize: 11, color: '#475569' }}>No logs yet</p>}
+            {logs.map((log, i) => (
+              <div key={i} style={{ marginBottom: 6, borderRadius: 6, overflow: 'hidden', border: '1px solid rgba(255,255,255,0.06)' }}>
+                <button
+                  onClick={() => setExpandedLog(expandedLog === i ? null : i)}
+                  style={{ width: '100%', display: 'flex', justifyContent: 'space-between', padding: '6px 10px', background: 'rgba(0,0,0,0.3)', border: 'none', cursor: 'pointer', textAlign: 'left' as const }}
+                >
+                  <span style={{ fontSize: 10, color: '#94A3B8', fontFamily: 'var(--font-mono)' }}>
+                    {log.agent_role} · iter {log.iteration} · {log.input_tokens + log.output_tokens} tok · ${(log.cost_usd || 0).toFixed(4)}
+                  </span>
+                  <span style={{ fontSize: 10, color: '#475569' }}>{expandedLog === i ? '▲' : '▼'}</span>
+                </button>
+                {expandedLog === i && (
+                  <div style={{ padding: '8px 10px', background: 'rgba(0,0,0,0.5)', maxHeight: 300, overflow: 'auto' }}>
+                    <p style={{ fontSize: 10, color: '#64748B', margin: '0 0 6px', fontWeight: 700 }}>RESPONSE:</p>
+                    <pre style={{ fontSize: 10, color: '#94A3B8', whiteSpace: 'pre-wrap', margin: 0, fontFamily: 'var(--font-mono)', lineHeight: 1.5 }}>
+                      {log.response_text?.slice(0, 2000)}{(log.response_text?.length || 0) > 2000 ? '…' : ''}
+                    </pre>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
 
       {/* Brief toggle */}
       <div style={{ marginBottom: 14 }}>
