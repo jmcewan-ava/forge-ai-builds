@@ -57,7 +57,9 @@ export interface Workstream {
   tasks: Task[]; brief: string; context_packet?: string; output_files: string[]
   output_code?: Record<string, string>; github_pr_url?: string; estimated_files?: string[]
   created_at: string; updated_at: string; started_at?: string; completed_at?: string
+  github_merge_sha?: string; github_merged_at?: string
 }
+
 
 export interface Task {
   id: string; workstream_id: string; text: string; done: boolean; done_at?: string
@@ -152,7 +154,7 @@ export interface GitHubConfig {
   owner: string; repo: string; token: string; defaultBranch: string
 }
 
-export interface CommitResult { pr_url?: string; files_committed: string[]; branch: string }
+export interface CommitResult { pr_url?: string; pr_number?: number; files_committed: string[]; branch: string }
 
 export interface CostRecord {
   session_delta_usd: number; session_total_usd: number

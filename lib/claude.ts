@@ -1,10 +1,10 @@
 /**
- * FORGE AI — Claude Agent Wrappers v3
- * 
+ * FORGE AI — Claude Agent Wrappers v4
+ *
  * All LLM calls go through here. Never call Anthropic SDK directly from routes.
- * 
+ *
  * Agents:
- * - runOfficeManager:   Opus — orchestration, decomposition
+ * - runOfficeManager:   Opus — orchestration, decomposition (max_tokens: 16000)
  * - runBuilderAgent:    Sonnet — code generation
  * - runQAManager:       Sonnet — code review, failure diagnosis
  * - runInterviewAgent:  Sonnet — spec gap questions
@@ -17,6 +17,30 @@ import type {
 } from './types'
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY! })
+
+// ─── RETRY WRAPPER ────────────────────────────────────────────────────────────
+// Anthropic API can be slow or overloaded — retry up to 3x with backoff.
+// Never retries on auth errors (401) or invalid request (400).
+
+async function withRetry<T>(fn: () => Promise<T>, label: string, maxRetries = 3): Promise<T> {
+  let lastError: unknown
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn()
+    } catch (err: any) {
+      lastError = err
+      const status = err?.status || err?.statusCode
+      // Don't retry client errors
+      if (status && status < 500 && status !== 429) throw err
+      if (attempt < maxRetries) {
+        const delay = Math.min(1000 * Math.pow(2, attempt - 1), 8000)
+        console.warn(`[claude] ${label} attempt ${attempt} failed (${status || 'network'}), retrying in ${delay}ms...`)
+        await new Promise(r => setTimeout(r, delay))
+      }
+    }
+  }
+  throw lastError
+}
 
 const OFFICE_MANAGER_MODEL = process.env.OFFICE_MANAGER_MODEL || 'claude-opus-4-6'
 const BUILDER_MODEL        = process.env.BUILDER_MODEL        || 'claude-sonnet-4-6'
@@ -31,13 +55,13 @@ export async function runOfficeManager(
 
   const systemPrompt = buildOfficeManagerPrompt(state)
 
-  const response = await anthropic.messages.create({
+  const response = await withRetry(() => anthropic.messages.create({
     model: OFFICE_MANAGER_MODEL,
-    max_tokens: 8192,
+    max_tokens: 16000,  // Raised from 8192 — long briefs were getting truncated
     temperature: 0.3,
     system: systemPrompt,
     messages: [{ role: 'user', content: brief }]
-  })
+  }), 'OfficeManager')
 
   const text = response.content[0].type === 'text' ? response.content[0].text : ''
 
@@ -49,20 +73,22 @@ export async function runOfficeManager(
       workstreams_created: parsed.workstreams || [],
       decisions_logged: parsed.decisions || [],
       questions_raised: parsed.questions || [],
-      spec_updated: !!(parsed.spec_updates?.goals || parsed.spec_updates?.constraints),
+      spec_updated: !!(parsed.spec_updates?.goals || parsed.spec_updates?.constraints || parsed.spec_updates?.out_of_scope),
       spec_version: undefined,
       office_manager_message: parsed.session_summary || 'Brief processed.',
-      estimated_cost_usd: estimateCost(OFFICE_MANAGER_MODEL, 6000, 4000)
-    }
+      estimated_cost_usd: estimateCost(OFFICE_MANAGER_MODEL, response.usage.input_tokens, response.usage.output_tokens),
+      // Pass spec_updates through so the route can persist them
+      ...(parsed.spec_updates ? { spec_updates: parsed.spec_updates } : {}),
+    } as BriefResponse & { spec_updates?: any }
   } catch (e) {
-    console.error('Office Manager parse error:', text.substring(0, 2000))
+    console.error('Office Manager parse error. Raw output (first 3000 chars):', text.substring(0, 3000))
     return {
       session_id: '',
       workstreams_created: [],
       decisions_logged: [],
       questions_raised: [],
       spec_updated: false,
-      office_manager_message: 'Office Manager encountered a parsing error. Please try again with a clearer brief.',
+      office_manager_message: 'Office Manager encountered a JSON parsing error. Try a shorter or more structured brief.',
       estimated_cost_usd: 0
     }
   }
@@ -215,7 +241,7 @@ Output ONLY valid JSON — no explanation, no markdown:
   "open_questions": ["questions that blocked you — be specific"]
 }`
 
-  const response = await anthropic.messages.create({
+  const response = await withRetry(() => anthropic.messages.create({
     model: BUILDER_MODEL,
     max_tokens: 8192,
     temperature: 0.2,
@@ -224,7 +250,7 @@ Output ONLY valid JSON — no explanation, no markdown:
       role: 'user',
       content: `Build workstream: "${workstream.name}"\n\nBrief:\n${workstream.brief}`
     }]
-  })
+  }), `Builder:${workstream.name}`)
 
   const text = response.content[0].type === 'text' ? response.content[0].text : ''
 
@@ -235,8 +261,9 @@ Output ONLY valid JSON — no explanation, no markdown:
       code: parsed.files || {},
       notes: parsed.notes || '',
       handoff: parsed.handoff || '',
-      open_questions: parsed.open_questions || []
-    }
+      open_questions: parsed.open_questions || [],
+      usage: response.usage,
+    } as BuilderOutput & { usage: any }
   } catch (e) {
     console.error('Builder Agent parse error for workstream:', workstream.name)
     return { code: {}, notes: 'Build failed — JSON parse error', handoff: '', open_questions: [] }
@@ -271,13 +298,9 @@ export async function runQAManager(
     }
   }
 
-  const fileReview = Object.entries(builderOutput.code)
-    .map(([path, content]) => `\n=== ${path} ===\n${content}`)
-    .join('\n')
-
   // Quick pre-checks before sending to LLM (saves tokens)
   const preCheckFailures: string[] = []
-  
+
   for (const [path, content] of Object.entries(builderOutput.code)) {
     if (content.includes(': any') || content.includes(' any,') || content.includes('<any>')) {
       preCheckFailures.push(`${path}: contains 'any' TypeScript type — use proper types`)
@@ -289,27 +312,28 @@ export async function runQAManager(
       preCheckFailures.push(`${path}: contains placeholder values — use env vars or real values`)
     }
   }
-  
+
   if (preCheckFailures.length > 0) {
-    const revisedBrief = `${workstream.brief}
-
-FAILURES FROM PREVIOUS ATTEMPT — FIX THESE:
-${preCheckFailures.map(f => `- ${f}`).join('\n')}
-
-These are hard failures. Do not proceed until fixed.`
-    
     return {
       passed: false,
       failed_check: 'Pre-check: TypeScript/placeholder violations',
       failures: preCheckFailures,
-      revised_brief: revisedBrief,
+      revised_brief: `${workstream.brief}\n\nFAILURES FROM PREVIOUS ATTEMPT — FIX THESE:\n${preCheckFailures.map(f => `- ${f}`).join('\n')}\n\nThese are hard failures. Do not proceed until fixed.`,
       pattern_type: preCheckFailures.some(f => f.includes("'any'")) ? 'TypeScript any type' : 'Placeholder code',
       pattern_prevention: "Always use explicit TypeScript types. Never use 'any'. Never leave TODO comments.",
       escalate: false
     }
   }
 
-  const systemPrompt = `You are the QA Manager in the Forge AI system. You review code produced by Builder Agents.
+  const fileReview = Object.entries(builderOutput.code)
+    .map(([path, content]) => `\n=== ${path} ===\n${content}`)
+    .join('\n')
+
+  const response = await withRetry(() => anthropic.messages.create({
+    model: QA_MODEL,
+    max_tokens: 2048,
+    temperature: 0.1,
+    system: `You are the QA Manager in the Forge AI system. You review code produced by Builder Agents.
 
 Workstream brief: ${workstream.brief}
 Builder notes: ${builderOutput.notes}
@@ -319,7 +343,7 @@ Iteration: ${iterationCount + 1} of ${MAX_ITERATIONS}
 Review checklist (check in order, fail on first issue):
 1. All required files are present
 2. No TypeScript 'any' types
-3. No TODO/FIXME/placeholder comments  
+3. No TODO/FIXME/placeholder comments
 4. All imports are valid (real npm packages or relative paths)
 5. All async functions have error handling
 6. All env vars used are standard or in the spec
@@ -334,25 +358,19 @@ Respond ONLY with valid JSON:
   "passed": boolean,
   "failed_check": "CHECK N — description" | null,
   "failures": ["specific failure — actionable description"],
-  "revised_brief": "complete revised brief if not passed — include all original context plus specific fix instructions" | null,
-  "pattern_type": "short category name if this is a recurring type of error" | null,
-  "pattern_prevention": "text to inject into future builder briefs to prevent this" | null,
+  "revised_brief": "complete revised brief if not passed" | null,
+  "pattern_type": "short category name if recurring error" | null,
+  "pattern_prevention": "text to inject into future builder briefs" | null,
   "escalate": false
-}`
-
-  const response = await anthropic.messages.create({
-    model: QA_MODEL,
-    max_tokens: 2048,
-    temperature: 0.1,
-    system: systemPrompt,
+}`,
     messages: [{ role: 'user', content: 'Review this builder output.' }]
-  })
+  }), `QA:${workstream.name}`)
 
   const text = response.content[0].type === 'text' ? response.content[0].text : ''
 
   try {
     const clean = text.replace(/```json|```/g, '').trim()
-    return JSON.parse(clean)
+    return { ...JSON.parse(clean), usage: response.usage }
   } catch {
     return {
       passed: false,
@@ -375,7 +393,11 @@ export async function runInterviewAgent(
     .filter(q => !q.answered)
     .map(q => q.question)
 
-  const systemPrompt = `You are the Interview Agent for Forge AI.
+  const response = await anthropic.messages.create({
+    model: BUILDER_MODEL,
+    max_tokens: 500,
+    temperature: 0.4,
+    system: `You are the Interview Agent for Forge AI.
 
 Your job: identify the single most important gap in the project spec and ask the founder one precise question.
 
@@ -402,13 +424,7 @@ Respond ONLY with valid JSON:
   "context": "why this matters and what it unblocks",
   "urgency": "low|medium|high|blocking",
   "spec_section": "vision|goals|constraints|out_of_scope|tech_stack|architecture"
-}`
-
-  const response = await anthropic.messages.create({
-    model: BUILDER_MODEL,
-    max_tokens: 500,
-    temperature: 0.4,
-    system: systemPrompt,
+}`,
     messages: [{ role: 'user', content: 'What is the most important question to ask right now?' }]
   })
 
@@ -431,8 +447,8 @@ Respond ONLY with valid JSON:
 
 function estimateCost(model: string, inputTokens: number, outputTokens: number): number {
   const rates: Record<string, { input: number; output: number }> = {
-    'claude-opus-4-6':    { input: 3.0 / 1_000_000,  output: 15.0 / 1_000_000 },
-    'claude-sonnet-4-6':  { input: 0.30 / 1_000_000, output: 1.50 / 1_000_000 },
+    'claude-opus-4-6':   { input: 3.0 / 1_000_000,  output: 15.0 / 1_000_000 },
+    'claude-sonnet-4-6': { input: 0.30 / 1_000_000, output: 1.50 / 1_000_000 },
   }
   const rate = rates[model] || rates['claude-sonnet-4-6']
   return (inputTokens * rate.input) + (outputTokens * rate.output)

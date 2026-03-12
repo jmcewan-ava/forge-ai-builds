@@ -1,3 +1,14 @@
 {
-  "framework": "nextjs"
+  "framework": "nextjs",
+  "functions": {
+    "app/api/agent/run-phase/route.ts": {
+      "maxDuration": 300
+    },
+    "app/api/agent/run/route.ts": {
+      "maxDuration": 300
+    },
+    "app/api/brief/route.ts": {
+      "maxDuration": 60
+    }
+  }
 }

@@ -98,17 +98,32 @@ export async function commitFiles(
   // ── Open PR ───────────────────────────────────────────────────────────────
 
   let prUrl: string | undefined
-  
+  let prNumber: number | undefined
+
   try {
-    const { data: pr } = await octokit.rest.pulls.create({
+    // Check if PR already exists for this branch (idempotent)
+    const { data: existingPRs } = await octokit.rest.pulls.list({
       owner: config.owner,
       repo: config.repo,
-      title: `Forge AI: ${workstreamName}`,
-      body: buildPRBody(workstreamId, workstreamName, committedFiles),
-      head: branchName,
-      base: config.defaultBranch
+      head: `${config.owner}:${branchName}`,
+      state: 'open',
     })
-    prUrl = pr.html_url
+
+    if (existingPRs.length > 0) {
+      prUrl = existingPRs[0].html_url
+      prNumber = existingPRs[0].number
+    } else {
+      const { data: pr } = await octokit.rest.pulls.create({
+        owner: config.owner,
+        repo: config.repo,
+        title: `Forge AI: ${workstreamName}`,
+        body: buildPRBody(workstreamId, workstreamName, committedFiles),
+        head: branchName,
+        base: config.defaultBranch
+      })
+      prUrl = pr.html_url
+      prNumber = pr.number
+    }
   } catch (err) {
     // PR creation failure is non-fatal — files are committed
     console.error('PR creation failed (non-fatal):', err)
@@ -116,6 +131,7 @@ export async function commitFiles(
 
   return {
     pr_url: prUrl,
+    pr_number: prNumber,
     files_committed: committedFiles,
     branch: branchName
   }

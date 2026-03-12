@@ -1,5 +1,7 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  experimental: { serverComponentsExternalPackages: ['@anthropic-ai/sdk'] }
+  // serverExternalPackages replaces experimental.serverComponentsExternalPackages in Next 14.2+
+  serverExternalPackages: ['@anthropic-ai/sdk'],
 }
+
 module.exports = nextConfig

@@ -6,6 +6,9 @@
 
 /* ─── CSS VARIABLES ─────────────────────────────────────────────────────────── */
 :root {
+  --font-sans: 'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-mono: 'DM Mono', 'Fira Code', 'Cascadia Code', monospace;
+
   --bg:         #0B0C14;
   --bg-card:    #12131F;
   --bg-raised:  #1a1b2e;
