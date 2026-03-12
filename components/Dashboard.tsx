@@ -145,7 +145,8 @@ function PhaseRunner({ projectId, onComplete }: { projectId: string; onComplete:
       localStorage.setItem('forge_autonomous', String(val))
     }
   }
-  const [log, setLog] = useState<string[]>([])
+  type LogLine = { msg: string; type: 'info' | 'success' | 'error' | 'pr' | 'phase' }
+  const [log, setLog] = useState<LogLine[]>([])
   const logRef = useRef<HTMLDivElement>(null)
   const abortRef = useRef<AbortController | null>(null)
 
@@ -153,13 +154,13 @@ function PhaseRunner({ projectId, onComplete }: { projectId: string; onComplete:
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight
   }, [log])
 
-  function addLog(msg: string) {
-    setLog(prev => [...prev, `[${new Date().toLocaleTimeString()}] ${msg}`])
+  function addLog(msg: string, type: LogLine['type'] = 'info') {
+    setLog(prev => [...prev, { msg: `[${new Date().toLocaleTimeString()}] ${msg}`, type }])
   }
 
   async function runPhase() {
     setRunning(true)
-    setLog([`[${new Date().toLocaleTimeString()}] ${autonomous ? '⚡ Autonomous build starting...' : '⚡ Starting next phase...'}`])
+    setLog([{ msg: `[${new Date().toLocaleTimeString()}] ${autonomous ? '⚡ Autonomous build starting...' : '⚡ Starting next phase...'}`, type: 'info' }])
 
     abortRef.current = new AbortController()
 
@@ -187,7 +188,7 @@ function PhaseRunner({ projectId, onComplete }: { projectId: string; onComplete:
 
       if (!res.ok || !res.body) {
         const err = await res.text().catch(() => 'Unknown error')
-        addLog(`✗ Error: ${err}`)
+        addLog(`✗ Error: ${err}`, 'error')
         return
       }
 
@@ -212,22 +213,24 @@ function PhaseRunner({ projectId, onComplete }: { projectId: string; onComplete:
                 addLog(event.message)
                 break
               case 'workstream_start':
-                addLog(`→ Building: ${event.name}`)
+                addLog(`⚡ Building: ${event.name}`, 'info')
                 break
-              case 'workstream_complete':
-                addLog(`✓ ${event.name} — ${event.files} files, ${event.iterations} QA iteration${event.iterations !== 1 ? 's' : ''}${event.merged ? ' — merged' : event.pr_url ? ' — PR open' : ''}`)
+              case 'workstream_complete': {
+                const prPart = event.merged ? ` · ✓ merged` : event.pr_url ? ` · PR open` : ''
+                addLog(`✓ ${event.name} — ${event.files} file${event.files !== 1 ? 's' : ''}, ${event.iterations} QA iter${prPart}${event.pr_url ? ` → ${event.pr_url}` : ''}`, event.merged ? 'pr' : 'success')
                 break
+              }
               case 'workstream_failed':
-                addLog(`✗ ${event.name} (${event.status}): ${event.reason}`)
+                addLog(`✗ ${event.name} (${event.status}): ${event.reason}`, 'error')
                 break
               case 'phase_complete':
-                addLog(`── Phase ${event.phase} done: ${event.completed} complete, ${event.failed} failed ──`)
+                addLog(`── Phase ${event.phase}: ${event.completed} complete, ${event.failed} failed ──`, event.failed > 0 ? 'error' : 'phase')
                 break
               case 'error':
-                addLog(`✗ Error: ${event.message}`)
+                addLog(`✗ ${event.message}`, 'error')
                 break
               case 'done':
-                addLog(`✓ Run complete — ${event.summary.total_completed} workstreams done, ${event.summary.total_failed} failed`)
+                addLog(`✓ Done — ${event.summary.total_completed} complete, ${event.summary.total_failed} failed`, event.summary.total_failed > 0 ? 'error' : 'success')
                 break
             }
           } catch { /* ignore malformed SSE lines */ }
@@ -238,7 +241,7 @@ function PhaseRunner({ projectId, onComplete }: { projectId: string; onComplete:
 
     } catch (err: any) {
       if (err?.name !== 'AbortError') {
-        addLog(`✗ Error: ${String(err)}`)
+        addLog(`✗ Error: ${String(err)}`, 'error')
       }
     } finally {
       setRunning(false)
@@ -248,7 +251,7 @@ function PhaseRunner({ projectId, onComplete }: { projectId: string; onComplete:
 
   function cancel() {
     abortRef.current?.abort()
-    addLog('⚠ Cancelled by user')
+    addLog('⚠ Cancelled by user', 'error')
     setRunning(false)
   }
 
@@ -303,17 +306,39 @@ function PhaseRunner({ projectId, onComplete }: { projectId: string; onComplete:
         <div
           ref={logRef}
           style={{
-            maxHeight: 140, overflowY: 'auto' as const, padding: '8px 10px',
-            background: 'rgba(0,0,0,0.3)', borderRadius: 6,
-            fontFamily: 'var(--font-mono)', fontSize: 11, color: '#64748B',
-            display: 'flex', flexDirection: 'column' as const, gap: 2
+            maxHeight: 260, overflowY: 'auto' as const, padding: '10px 12px',
+            background: 'rgba(0,0,0,0.4)', borderRadius: 6,
+            fontFamily: 'var(--font-mono)', fontSize: 11,
+            display: 'flex', flexDirection: 'column' as const, gap: 3
           }}
         >
-          {log.map((line, i) => (
-            <span key={i} style={{ color: line.includes('✓') ? '#10B981' : line.includes('✗') ? '#EF4444' : '#64748B' }}>
-              {line}
-            </span>
-          ))}
+          {log.map((line, i) => {
+            const color = line.type === 'success' ? '#10B981'
+              : line.type === 'pr' ? '#34D399'
+              : line.type === 'error' ? '#EF4444'
+              : line.type === 'phase' ? '#6366F1'
+              : '#64748B'
+
+            // Extract PR URL if present and make it clickable
+            const prMatch = line.msg.match(/→ (https:\/\/github\.com\/[^\s]+)/)
+            if (prMatch) {
+              const url = prMatch[1]
+              const beforeUrl = line.msg.slice(0, line.msg.indexOf('→ ' + url))
+              return (
+                <span key={i} style={{ color, lineHeight: 1.6 }}>
+                  {beforeUrl}
+                  <a href={url} target="_blank" rel="noopener noreferrer"
+                    style={{ color: '#34D399', textDecoration: 'underline', cursor: 'pointer' }}>
+                    → View PR ↗
+                  </a>
+                </span>
+              )
+            }
+
+            return (
+              <span key={i} style={{ color, lineHeight: 1.6 }}>{line.msg}</span>
+            )
+          })}
         </div>
       )}
     </div>
