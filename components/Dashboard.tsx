@@ -134,7 +134,17 @@ function AutoRunCountdown({ onRun, onCancel }: { onRun: () => void; onCancel: ()
 
 function PhaseRunner({ projectId, onComplete }: { projectId: string; onComplete: () => void }) {
   const [running, setRunning] = useState(false)
-  const [autonomous, setAutonomous] = useState(false)
+  const [autonomous, setAutonomous] = useState(() => {
+    if (typeof window === 'undefined') return false
+    return localStorage.getItem('forge_autonomous') === 'true'
+  })
+
+  function toggleAutonomous(val: boolean) {
+    setAutonomous(val)
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('forge_autonomous', String(val))
+    }
+  }
   const [log, setLog] = useState<string[]>([])
   const logRef = useRef<HTMLDivElement>(null)
   const abortRef = useRef<AbortController | null>(null)
@@ -249,7 +259,7 @@ function PhaseRunner({ projectId, onComplete }: { projectId: string; onComplete:
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
           <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
             <div
-              onClick={() => !running && setAutonomous(!autonomous)}
+              onClick={() => !running && toggleAutonomous(!autonomous)}
               style={{
                 width: 32, height: 18, borderRadius: 9, position: 'relative' as const, cursor: 'pointer',
                 background: autonomous ? '#6366F1' : 'rgba(255,255,255,0.1)',
