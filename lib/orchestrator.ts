@@ -231,7 +231,7 @@ export async function runWorkstream(
       const wsWithBrief = { ...workstream, brief: currentBrief, context_packet: contextPacket }
 
       // Run builder
-      const rawBuilderOutput = await runBuilderAgent(wsWithBrief, livingSpec, failurePatterns) as Record<string, unknown>
+      const rawBuilderOutput = await runBuilderAgent(wsWithBrief, livingSpec, failurePatterns) as unknown as Record<string, unknown>
       builderOutput = rawBuilderOutput as typeof builderOutput
 
       // Track REAL token usage from the API response
@@ -255,7 +255,7 @@ export async function runWorkstream(
       }).eq('id', workstream.id)
 
       // Run QA
-      const rawQaResult = await runQAManager(builderOutput, workstream, livingSpec) as Record<string, unknown>
+      const rawQaResult = await runQAManager(builderOutput, workstream, livingSpec) as unknown as Record<string, unknown>
 
       // Track QA token usage
       const qaUsage = rawQaResult.usage as { input_tokens: number; output_tokens: number } | undefined
