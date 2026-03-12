@@ -32,6 +32,7 @@ export async function POST(req: NextRequest) {
 
   setCurrentProject(project_id)
 
+  const db = getServiceClient()
   const encoder = new TextEncoder()
   function send(data: object): Uint8Array {
     return encoder.encode(`data: ${JSON.stringify(data)}\n\n`)
@@ -39,7 +40,6 @@ export async function POST(req: NextRequest) {
 
   const stream = new ReadableStream({
     async start(controller) {
-      const db = getServiceClient()
       try {
         controller.enqueue(send({ type: 'log', message: `Starting agent run for project ${project_id}` }))
 
@@ -76,9 +76,9 @@ export async function POST(req: NextRequest) {
 
           const { data: completedWs } = await db
             .from('workstreams').select('id').eq('project_id', project_id).eq('status', 'complete')
-          const completedIds = new Set((completedWs || []).map((w: any) => w.id))
+          const completedIds = new Set((completedWs || []).map((w: { id: string }) => w.id))
 
-          const unblocked = allWs.filter(ws =>
+          const unblocked = allWs.filter((ws: { blocked_by?: string[] }) =>
             (ws.blocked_by || []).every((id: string) => completedIds.has(id))
           )
 
@@ -103,7 +103,7 @@ export async function POST(req: NextRequest) {
             }
 
             const results = await Promise.allSettled(
-              batch.map(ws => runWorkstream(ws, livingSpec, failurePatterns, project_id))
+              batch.map((ws: Record<string, unknown>) => runWorkstream(ws as never, livingSpec, failurePatterns, project_id))
             )
 
             for (let j = 0; j < results.length; j++) {
@@ -178,6 +178,17 @@ export async function POST(req: NextRequest) {
       } catch (err) {
         controller.enqueue(send({ type: 'error', message: String(err) }))
       } finally {
+        // Always reset agent statuses for this project to prevent ghost agents
+        try {
+          await db
+            .from('agents')
+            .update({ status: 'idle', current_workstream: null })
+            .eq('project_id', project_id)
+            .eq('status', 'running')
+          console.log('[Agent Stream] Agent status reset to idle')
+        } catch (cleanupErr) {
+          console.error('[Agent Stream] Failed to reset agent status:', cleanupErr)
+        }
         controller.close()
       }
     }
