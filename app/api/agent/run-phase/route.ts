@@ -8,7 +8,7 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server'
-import { runPhase, runAutonomous } from '@/lib/orchestrator'
+import { runPhase, runFullProject } from '@/lib/orchestrator'
 import { setCurrentProject } from '@/lib/cost-controller'
 
 export const maxDuration = 300 // 5 min — requires Vercel Pro; hobby gets 60s
@@ -38,7 +38,7 @@ export async function POST(req: NextRequest) {
   try {
     if (autonomous) {
       // Run all phases sequentially until complete or blocked
-      const result = await runAutonomous(project_id, maxParallel)
+      const result = await runFullProject(project_id, maxParallel)
       return NextResponse.json(result)
     }
 
